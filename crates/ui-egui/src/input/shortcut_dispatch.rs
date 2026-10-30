@@ -344,7 +344,7 @@ pub fn disabled_reason(app: &PhotocraftApp, id: &str) -> String {
     )
 }
 
-fn label(id: &str) -> String {
+pub(crate) fn label(id: &str) -> String {
     crate::menu_catalog::CATALOG
         .iter()
         .find(|c| c.3 == id)

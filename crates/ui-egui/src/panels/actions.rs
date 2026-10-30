@@ -32,6 +32,24 @@ pub struct ActionsUi {
     /// The action whose name is being edited in place (double-click on its name).
     #[serde(skip)]
     renaming: Option<RenameAction>,
+    /// The action whose shortcut is being captured from the keyboard.
+    #[serde(skip)]
+    shortcut_capture: Option<ShortcutCapture>,
+}
+
+/// Custom Shortcut…: any key with any modifiers, not only Photoshop's F1–F15 (#7646 kept those
+/// in the context menu for `.atn` compatibility; other keys are saved in the preferences only).
+#[derive(Clone, Debug, PartialEq)]
+struct ShortcutCapture {
+    name: String,
+    /// Modifiers held so far, carried across frames (see [`crate::prefs_ui::capture_key_press`]).
+    mods: egui::Modifiers,
+    /// The pressed combination in shortcut notation; `Some("")` removes the shortcut.
+    key: Option<String>,
+    error: Option<String>,
+    /// The pass the capture window was last drawn in. A capture whose panel stopped drawing it
+    /// (the panel was closed by automation) must not keep the application shortcuts blocked.
+    drawn: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -79,10 +97,131 @@ pub(crate) fn shortcut_id(name: &str) -> String {
     format!("{SHORTCUT_PREFIX}{name}")
 }
 
+/// Open the Custom Shortcut… capture for the action `name`.
+pub(crate) fn begin_shortcut_capture(app: &mut PhotocraftApp, ctx: &egui::Context, name: &str) {
+    app.ui.actions.shortcut_capture =
+        Some(ShortcutCapture { name: name.to_string(), mods: egui::Modifiers::NONE, key: None, error: None, drawn: ctx.cumulative_pass_nr() });
+}
+
+/// Is an action shortcut being captured? Application shortcuts wait until it's done, so the
+/// keys pressed reach the capture instead of running commands.
+pub(crate) fn capturing_shortcut(app: &mut PhotocraftApp, ctx: &egui::Context) -> bool {
+    let live = app.ui.actions.shortcut_capture.as_ref().is_some_and(|c| ctx.cumulative_pass_nr().saturating_sub(c.drawn) <= 2);
+    if !live {
+        app.ui.actions.shortcut_capture = None;
+    }
+    live
+}
+
+/// What else `shortcut` runs now (a menu command, a tool, another action), to warn before the
+/// action takes the key over. Action bindings win over the defaults they share a key with.
+fn shortcut_owner(app: &PhotocraftApp, name: &str, shortcut: &str) -> Option<String> {
+    let sc = crate::shortcuts::parse(shortcut)?;
+    let own = shortcut_id(name);
+    crate::shortcut_dispatch::bindings(app).into_iter().find(|(id, b)| *b == sc && *id != own).map(|(id, _)| match id.strip_prefix(SHORTCUT_PREFIX) {
+        Some(other) => format!("{} \"{other}\"", tl!("the action")),
+        None => crate::shortcut_dispatch::label(&id),
+    })
+}
+
+/// The Custom Shortcut… window: press any combination, then Assign. ⌫ removes the shortcut and
+/// Esc cancels, as in Edit › Keyboard Shortcuts.
+fn shortcut_capture_window(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    let Some(mut cap) = app.ui.actions.shortcut_capture.take() else { return };
+    cap.drawn = ctx.cumulative_pass_nr();
+    let (mods, pressed) = ctx.input(|i| crate::prefs_ui::capture_key_press(cap.mods, i));
+    cap.mods = mods;
+    // None: keep capturing; Some(true): assign; Some(false): cancel.
+    let mut done: Option<bool> = None;
+    if let Some((key, m)) = pressed {
+        let bare = !(m.shift || m.alt || m.ctrl || m.command || m.mac_cmd);
+        match key {
+            egui::Key::Escape if bare => done = Some(false),
+            egui::Key::Enter if bare && cap.key.is_some() => done = Some(true),
+            egui::Key::Backspace | egui::Key::Delete if bare => cap.key = Some(String::new()),
+            _ => {
+                if let Some(text) = crate::prefs_ui::shortcut_text(key, m) {
+                    cap.key = Some(text);
+                }
+            }
+        }
+        cap.error = None;
+        // The keys were for the capture, not for a focused button or the canvas.
+        ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_))));
+    }
+    let current = app.session.prefs().shortcuts.get(&shortcut_id(&cap.name)).cloned().unwrap_or_default();
+    let reserved = cap.key.as_deref().is_some_and(|k| !k.is_empty() && crate::prefs_ui::reserved_shortcut(k));
+    let owner = cap.key.as_deref().filter(|k| !k.is_empty() && *k != current).and_then(|k| shortcut_owner(app, &cap.name, k));
+    let t = Tokens::get(ctx);
+    egui::Modal::new(egui::Id::new("action-shortcut-capture")).show(ctx, |ui| {
+        ui.set_width(360.0);
+        ui.heading(tl!("Action Shortcut"));
+        ui.label(egui::RichText::new(&cap.name).color(t.text_dim));
+        ui.separator();
+        ui.label(tl!("Press any key combination, for example Ctrl+Alt+1, Shift+Q or a single key."));
+        ui.add_space(6.0);
+        let shown = match cap.key.as_deref() {
+            None if current.is_empty() => tl!("Waiting for keys…").to_string(),
+            None => crate::shortcuts::pretty(&current),
+            Some("") => tl!("None").to_string(),
+            Some(k) => crate::shortcuts::pretty(k),
+        };
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.vertical_centered(|ui| ui.label(egui::RichText::new(shown).size(18.0).strong()));
+        });
+        ui.add_space(4.0);
+        if reserved {
+            ui.colored_label(t.danger, tl!("The system uses this shortcut, so it can't be assigned."));
+        } else if let Some(owner) = &owner {
+            let template = "Now used by {owner}. The action will take it over.";
+            ui.colored_label(t.warning, crate::i18n::fmt(tl!(template), &[("owner", owner)]));
+        }
+        if let Some(e) = &cap.error {
+            ui.colored_label(t.danger, e);
+        }
+        ui.label(egui::RichText::new(tl!("Backspace removes the shortcut. Esc cancels.")).color(t.text_faint).size(11.0));
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if ui.add_enabled(cap.key.is_some() && !reserved, egui::Button::new(tl!("Assign"))).clicked() {
+                done = Some(true);
+            }
+            if ui.add_enabled(!current.is_empty(), egui::Button::new(tl!("Remove Shortcut"))).clicked() {
+                cap.key = Some(String::new());
+                done = Some(true);
+            }
+            if ui.button(tl!("Cancel")).clicked() {
+                done = Some(false);
+            }
+        });
+    });
+    match done {
+        Some(true) if !reserved => {
+            let key = cap.key.clone().unwrap_or(current);
+            match assign_shortcut(app, &cap.name, &key) {
+                Ok(_) => {
+                    app.ui.status = if key.is_empty() {
+                        tl!("Action shortcut removed").to_string()
+                    } else {
+                        crate::i18n::fmt(tl!("Action shortcut set to {key}"), &[("key", &crate::shortcuts::pretty(&key))])
+                    };
+                    app.ui.status_error = false;
+                }
+                Err(e) => {
+                    cap.error = Some(e);
+                    app.ui.actions.shortcut_capture = Some(cap);
+                }
+            }
+        }
+        Some(_) => {}
+        None => app.ui.actions.shortcut_capture = Some(cap),
+    }
+}
+
 pub(crate) fn assign_shortcut(app: &mut PhotocraftApp, name: &str, shortcut: &str) -> Result<Value, String> {
     let id = shortcut_id(name);
     let mut set = serde_json::Map::new();
-    // A function key belongs to only one action. Ordinary menu bindings remain
+    // A key belongs to only one action. Ordinary menu bindings remain
     // intact and become available again when the action binding is removed.
     for (other, assigned) in &app.session.prefs().shortcuts {
         if other.starts_with(SHORTCUT_PREFIX) && other != &id && assigned == shortcut && !shortcut.is_empty() {
@@ -643,6 +782,9 @@ pub fn panel_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     if ui.add_enabled(can_delete, egui::Button::new(tl!("Delete"))).clicked() {
         act = Some("delete");
     }
+    if ui.add_enabled(selected && !recording, egui::Button::new(tl!("Set Shortcut…"))).clicked() {
+        act = Some("shortcut");
+    }
     ui.separator();
     if ui.add_enabled(selected, egui::Button::new(tl!("Insert Stop…"))).clicked() {
         act = Some("stop");
@@ -677,6 +819,12 @@ pub fn panel_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         }
         "load" => load_dialog(app),
         "stop" => insert_stop_dialog(app),
+        "shortcut" => {
+            if let Some(name) = app.ui.actions.selected.and_then(|i| app.session.actions.list.get(i)).map(|a| a.name.clone()) {
+                begin_shortcut_capture(app, ui.ctx(), &name);
+            }
+            Ok(Value::Null)
+        }
         _ => save_dialog(app, None),
     };
     if let Err(e) = r
@@ -867,9 +1015,13 @@ fn action_context_menu(app: &mut PhotocraftApp, response: &egui::Response, index
         let current = app.session.prefs().shortcuts.get(&shortcut_id(name)).cloned().unwrap_or_default();
         // Photoshop's Action Options: a function key, with Shift and Command (#7646).
         let (key, mut shift, mut command) = photocraft_engine::atn_cmds::parse_function_key(&current).unwrap_or((0, false, false));
+        let custom = key == 0 && !current.is_empty();
+        if custom {
+            ui.selectable_label(true, crate::shortcuts::pretty(&current));
+        }
         for number in std::iter::once(0).chain(1..=12) {
             let label = if number == 0 { tl!("None").to_string() } else { format!("F{number}") };
-            if ui.selectable_label(key == number, label).clicked() {
+            if ui.selectable_label(key == number && !custom, label).clicked() {
                 let chosen = if number == 0 { String::new() } else { photocraft_engine::atn_cmds::function_key_name(number, shift, command) };
                 let _ = assign_shortcut(app, name, &chosen);
                 ui.close();
@@ -882,6 +1034,10 @@ fn action_context_menu(app: &mut PhotocraftApp, response: &egui::Response, index
                 let _ = assign_shortcut(app, name, &photocraft_engine::atn_cmds::function_key_name(key, shift, command));
             }
         });
+        if ui.button(tl!("Custom Shortcut…")).clicked() {
+            begin_shortcut_capture(app, ui.ctx(), name);
+            ui.close();
+        }
         ui.separator();
         ui.menu_button(tl!("Color"), |ui| {
             for (id, label) in [
@@ -1138,6 +1294,7 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             app.ui.actions.button_mode = !app.ui.actions.button_mode;
         }
     });
+    shortcut_capture_window(app, ui.ctx());
     if let Some(i) = play_idx {
         match app.run("actions.play", json!({"action": i})) {
             Ok(v) => report_play(app, &v),

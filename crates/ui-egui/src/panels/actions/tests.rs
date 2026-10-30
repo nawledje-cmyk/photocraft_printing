@@ -105,6 +105,118 @@ fn a_function_key_with_shift_and_command_plays_its_action() {
     assert_eq!(layers(&app), before + 1, "Cmd+Shift+F2 plays it");
 }
 
+fn one_action_app() -> PhotocraftApp {
+    let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+    app.run("file.new", json!({"width": 32, "height": 32})).unwrap();
+    app.session.actions.list.push(Action { name: "Action 1".into(), steps: vec![("layer.new.layer".into(), json!({}))], ..Default::default() });
+    app
+}
+
+fn press_key(app: &mut PhotocraftApp, ctx: &egui::Context, key: egui::Key, modifiers: egui::Modifiers) {
+    use egui::Event;
+    ctx.begin_pass(egui::RawInput {
+        events: vec![
+            Event::ModifiersChanged(modifiers),
+            Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers },
+            Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers },
+        ],
+        modifiers,
+        ..Default::default()
+    });
+    crate::shortcuts::handle(app, ctx);
+    ctx.end_pass().textures_delta.clear();
+}
+
+/// Actions aren't limited to F1–F12: any combination, with or without modifiers, plays them.
+#[test]
+fn a_custom_non_function_key_plays_its_action() {
+    use egui::{Key, Modifiers};
+    let layers = |app: &PhotocraftApp| app.session.active().unwrap().doc.layers.len();
+    for (key, k, m) in [("Cmd+Alt+K", Key::K, Modifiers::COMMAND | Modifiers::ALT), ("Shift+7", Key::Num7, Modifiers::SHIFT), ("Cmd+Shift+F11", Key::F11, Modifiers::COMMAND | Modifiers::SHIFT)] {
+        let mut app = one_action_app();
+        assign_shortcut(&mut app, "Action 1", key).unwrap();
+        let ctx = egui::Context::default();
+        let before = layers(&app);
+        press_key(&mut app, &ctx, k, Modifiers::NONE);
+        assert_eq!(layers(&app), before, "{key}: the bare key doesn't play it");
+        press_key(&mut app, &ctx, k, m);
+        assert_eq!(layers(&app), before + 1, "{key} plays the action");
+    }
+}
+
+/// A custom key the action takes from a default binding (Cmd+J, Layer via Copy) plays the action.
+#[test]
+fn a_custom_key_taken_from_a_menu_command_plays_the_action() {
+    use egui::{Key, Modifiers};
+    let mut app = one_action_app();
+    assert!(shortcut_owner(&app, "Action 1", "Cmd+J").is_some(), "Cmd+J has a default owner to warn about");
+    assign_shortcut(&mut app, "Action 1", "Cmd+J").unwrap();
+    assert_eq!(shortcut_owner(&app, "Action 2", "Cmd+J").as_deref(), Some("the action \"Action 1\""));
+    let ctx = egui::Context::default();
+    let before = app.session.active().unwrap().doc.layers.len();
+    press_key(&mut app, &ctx, Key::J, Modifiers::COMMAND);
+    assert_eq!(app.session.active().unwrap().doc.layers.len(), before + 1);
+    assert!(app.session.actions.list.len() == 1 && app.session.actions.recording.is_none());
+}
+
+/// Custom Shortcut… captures the pressed combination and assigns it on Assign; meanwhile the
+/// keys don't run application shortcuts, and Esc leaves the old key.
+#[test]
+fn custom_shortcut_window_captures_any_combination() {
+    use egui::{Key, Modifiers};
+    use egui_kittest::{Harness, kittest::Queryable};
+    let mut app = one_action_app();
+    assign_shortcut(&mut app, "Action 1", "F2").unwrap();
+    let mut h = Harness::builder().with_size(vec2(480.0, 420.0)).build_ui_state(|ui, app| panel(app, ui), app);
+    h.run();
+    let ctx = h.ctx.clone();
+    begin_shortcut_capture(h.state_mut(), &ctx, "Action 1");
+    h.run();
+    h.get_by_label("Action Shortcut");
+    // While listening, the application shortcuts are held back.
+    assert!(capturing_shortcut(h.state_mut(), &ctx));
+    h.key_press_modifiers(Modifiers::COMMAND | Modifiers::ALT, Key::K);
+    h.run();
+    h.get_by_label("Assign").click();
+    h.run();
+    assert!(h.state().ui.actions.shortcut_capture.is_none());
+    assert_eq!(h.state().session.prefs().shortcuts.get(&shortcut_id("Action 1")).map(String::as_str), Some("Cmd+Alt+K"));
+
+    // Esc cancels without touching the binding.
+    begin_shortcut_capture(h.state_mut(), &ctx, "Action 1");
+    h.run();
+    h.key_press(Key::Q);
+    h.run();
+    h.key_press(Key::Escape);
+    h.run();
+    assert!(h.state().ui.actions.shortcut_capture.is_none());
+    assert_eq!(h.state().session.prefs().shortcuts.get(&shortcut_id("Action 1")).map(String::as_str), Some("Cmd+Alt+K"));
+
+    // Backspace then Assign removes it.
+    begin_shortcut_capture(h.state_mut(), &ctx, "Action 1");
+    h.run();
+    h.key_press(Key::Backspace);
+    h.run();
+    h.get_by_label("Assign").click();
+    h.run();
+    assert_eq!(h.state().session.prefs().shortcuts.get(&shortcut_id("Action 1")).map(String::as_str).unwrap_or(""), "");
+}
+
+/// A capture the panel stopped drawing (closed under it) gives the keyboard back.
+#[test]
+fn an_undrawn_capture_does_not_block_shortcuts() {
+    let mut app = one_action_app();
+    let ctx = egui::Context::default();
+    begin_shortcut_capture(&mut app, &ctx, "Action 1");
+    assert!(capturing_shortcut(&mut app, &ctx));
+    for _ in 0..4 {
+        ctx.begin_pass(egui::RawInput::default());
+        ctx.end_pass().textures_delta.clear();
+    }
+    assert!(!capturing_shortcut(&mut app, &ctx));
+    assert!(app.ui.actions.shortcut_capture.is_none());
+}
+
 #[test]
 fn double_clicking_an_action_name_renames_it_in_place() {
     use egui_kittest::{Harness, kittest::Queryable};
