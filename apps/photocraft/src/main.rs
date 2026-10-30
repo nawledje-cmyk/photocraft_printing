@@ -506,6 +506,10 @@ fn main() -> eframe::Result {
             let session = Session::new();
             PhotocraftApp::install_type_reset_hooks(&cc.egui_ctx);
             let mut app = PhotocraftApp::new(session, services);
+            // The printers and the installed colour profiles are read in the background now, so
+            // File › Print and File › New find them ready instead of waiting for the system.
+            photocraft_engine::print_cmds::start_printer_refresh(&app.session);
+            let _ = photocraft_engine::installed_profiles::installed();
             app.min_frame_ms = uncapped.then_some(1000.0 / 240.0);
             app.integrated_titlebar = cfg!(target_os = "macos");
             app.custom_titlebar = custom_titlebar;

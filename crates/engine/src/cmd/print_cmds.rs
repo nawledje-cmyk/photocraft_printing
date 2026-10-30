@@ -250,43 +250,73 @@ fn lists_in_background(s: &Session) -> bool {
 
 /// A background refresh of the system's printer lists is running.
 static REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The list the Print dialog shows has not landed yet (see [`printers_refreshing`]).
+static DIALOG_LIST_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// When the last refresh finished: lists this fresh aren't asked for again.
+static LAST_REFRESH: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+const PRINTERS_FRESH: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Lists the system's printers (both routes) on a background thread and keeps them for
-/// [`printers_without_waiting`] and [`rgb_printers_without_waiting`]. Asking the Windows spooler
-/// can take many seconds (network or offline printers, slow drivers), and the Print dialog asked
-/// on the UI thread, freezing the app as it opened. At most one refresh runs at a time; a
-/// session with a stand-in `printer_source` lists in place and starts none.
+/// Lists the system's printers on a background thread and keeps them for
+/// [`printers_without_waiting`] and [`rgb_printers_without_waiting`], so opening Print never
+/// waits for the spooler. At most one refresh runs at a time, and lists younger than a minute are
+/// kept (the dialog asks again as it opens and while it waits; restarting there held the spooler
+/// lock again, so Printer Settings said the driver was busy). The app starts one at launch so the
+/// list is usually ready before Print opens. A session with a stand-in `printer_source` lists in
+/// place and starts none.
+///
+/// On Windows the dialog's list (the GDI route's, one `EnumPrinters` call) lands first. The PDF
+/// route's list then reads every driver's PrintCapabilities, which takes seconds per printer
+/// (virtual printers included), so it is read without the spooler lock: Printer Settings,
+/// the driver's page and printing never wait behind it.
 pub fn start_printer_refresh(s: &Session) {
     use std::sync::atomic::Ordering;
-    if !lists_in_background(s) || REFRESHING.swap(true, Ordering::SeqCst) {
+    if !lists_in_background(s) {
         return;
     }
+    let fresh = LAST_REFRESH.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_some_and(|at| at.elapsed() < PRINTERS_FRESH);
+    if fresh || REFRESHING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    DIALOG_LIST_PENDING.store(true, Ordering::SeqCst);
     let spawned = std::thread::Builder::new().name("printer-list".into()).spawn(|| {
         use std::sync::atomic::Ordering;
-        // Clears the flag however the listing ends, so a failed driver can't block later refreshes.
+        // Clears the flags however the listing ends, so a failed driver can't block later refreshes.
         struct Done;
         impl Drop for Done {
             fn drop(&mut self) {
-                REFRESHING.store(false, std::sync::atomic::Ordering::SeqCst);
+                *LAST_REFRESH.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(std::time::Instant::now());
+                DIALOG_LIST_PENDING.store(false, Ordering::SeqCst);
+                REFRESHING.store(false, Ordering::SeqCst);
             }
         }
         let _done = Done;
-        with_spooler(|| {
+        if cfg!(windows) {
+            with_spooler(|| {
+                SYSTEM_LISTINGS.fetch_add(1, Ordering::Relaxed);
+                keep(&LAST_RGB_PRINTERS, None, craft_print::rgb::printers());
+            });
+            DIALOG_LIST_PENDING.store(false, Ordering::SeqCst);
             SYSTEM_LISTINGS.fetch_add(1, Ordering::Relaxed);
             keep(&LAST_PRINTERS, None, craft_print::printers());
-            SYSTEM_LISTINGS.fetch_add(1, Ordering::Relaxed);
-            keep(&LAST_RGB_PRINTERS, None, craft_print::rgb::printers());
-        });
+        } else {
+            with_spooler(|| {
+                SYSTEM_LISTINGS.fetch_add(1, Ordering::Relaxed);
+                keep(&LAST_PRINTERS, None, craft_print::printers());
+                SYSTEM_LISTINGS.fetch_add(1, Ordering::Relaxed);
+                keep(&LAST_RGB_PRINTERS, None, craft_print::rgb::printers());
+            });
+        }
     });
     if spawned.is_err() {
+        DIALOG_LIST_PENDING.store(false, Ordering::SeqCst);
         REFRESHING.store(false, Ordering::SeqCst);
     }
 }
 
-/// Whether [`start_printer_refresh`] is still listing: the Print dialog shows the kept lists and
-/// checks again until it's done.
+/// Whether the printer list the Print dialog shows is still being fetched by
+/// [`start_printer_refresh`]: the dialog shows the kept lists and checks again until it lands.
 pub fn printers_refreshing() -> bool {
-    REFRESHING.load(std::sync::atomic::Ordering::SeqCst)
+    DIALOG_LIST_PENDING.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// `file.printers`' answer for a list from `craft-print`.

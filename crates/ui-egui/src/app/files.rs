@@ -659,8 +659,9 @@ pub(crate) fn remember_new_document(app: &mut PhotocraftApp, f: &serde_json::Map
 impl PhotocraftApp {
     /// File › New's fields: the defaults, then the settings of the last document made with the
     /// dialog (Photoshop starts from them, #1810), then the Clipboard preset (the clipboard image's
-    /// size, selected) when the clipboard holds an image. Opening the dialog is an explicit
-    /// request, so the OS clipboard is read here, as for a paste.
+    /// size, selected) when PhotoCraft holds a clipboard image (copied or pasted here). The OS
+    /// clipboard is not read: importing it decoded the whole image (or a copied file) on the UI
+    /// thread just for its size, freezing File › New for seconds on a slow machine.
     pub(crate) fn new_document_fields(&mut self) -> serde_json::Map<String, serde_json::Value> {
         let mut f = crate::state::UiState::new_document_fields();
         if let Some(serde_json::Value::Object(saved)) = self.session.prefs().dialogs.get(NEW_DOCUMENT) {
@@ -669,9 +670,6 @@ impl PhotocraftApp {
                     f.insert(k.into(), v.clone());
                 }
             }
-        }
-        if self.import_os_clipboard().is_err() {
-            return f;
         }
         if let Some(c) = self.session.clipboard.as_ref().filter(|c| !c.bounds.is_empty()) {
             crate::new_doc_ui::set_clipboard(&mut f, c.bounds.width(), c.bounds.height());

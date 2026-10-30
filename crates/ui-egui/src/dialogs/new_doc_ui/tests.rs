@@ -240,6 +240,27 @@ fn recent_category_lists_clipboard_then_created_documents_then_uncovered_default
     assert!(holds(&f, &settings(20, 30, 72.0)) && !holds(&f, &settings(800, 600, 72.0)));
 }
 
+/// Opening File › New never reads the OS clipboard: importing it decoded the whole image (or a
+/// copied file) on the UI thread just for its size, freezing the dialog for seconds.
+#[test]
+fn opening_new_does_not_read_the_os_clipboard() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let reads = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&reads);
+    let services = crate::Services {
+        clipboard_get_image: Some(Box::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(Some((4000, 3000, vec![0; 4000 * 3000 * 4])))
+        })),
+        ..Default::default()
+    };
+    let mut app = crate::PhotocraftApp::new(photocraft_engine::Session::new(), services);
+    let f = app.new_document_fields();
+    assert_eq!(reads.load(Ordering::SeqCst), 0, "File › New read the OS clipboard");
+    assert!(clipboard_preset(&f).is_none());
+}
+
 #[test]
 fn clipboard_preset_comes_first_and_is_selected() {
     // Nothing on the clipboard: the dialog opens as before.
