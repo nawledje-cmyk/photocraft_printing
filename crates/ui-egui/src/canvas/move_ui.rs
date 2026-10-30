@@ -249,8 +249,10 @@ fn floating_doc(app: &mut PhotocraftApp, idx: usize) -> Option<(Arc<Document>, u
         });
     }
     // While the piece is dragged, the canvas shows the document without it (composited once) and
-    // draws the piece over it at the pointer: no pixels move until the drag ends.
-    if crate::canvas::selection_drag_delta(app).is_some() {
+    // draws the piece over it at the pointer: no pixels move until the drag ends. It starts once
+    // the piece has moved (a press alone changes nothing) and lasts until the drag ends.
+    let started = app.move_preview.as_ref().is_some_and(|p| p.floating && p.base.is_some());
+    if crate::canvas::selection_drag_delta(app).is_some() && (started || offset != (0, 0)) {
         if let Some(shown) = overlay_doc(app, idx) {
             return Some(shown);
         }

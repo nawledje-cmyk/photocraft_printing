@@ -1088,8 +1088,9 @@ fn a_dragged_floating_piece_is_drawn_over_the_canvas_when_it_can_be() {
         ctx.begin_pass(egui::RawInput::default());
         let painter = ctx.layer_painter(egui::LayerId::background());
         crate::move_ui::draw_content(app, &painter, &xf);
-        let shapes = ctx.end_pass().shapes;
-        shapes.iter().filter(|s| matches!(s.shape, egui::epaint::Shape::Mesh(_))).count()
+        let mut out = ctx.end_pass();
+        out.textures_delta.clear();
+        out.shapes.iter().filter(|s| matches!(s.shape, egui::epaint::Shape::Mesh(_))).count()
     };
     let (mut app, layer) = painted();
     tool_event(&mut app, ToolEvent::Down { x: 20.0, y: 20.0, pressure: 1.0 }, Modifiers::COMMAND);

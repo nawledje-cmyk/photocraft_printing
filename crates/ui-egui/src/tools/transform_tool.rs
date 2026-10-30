@@ -68,7 +68,7 @@ pub use pointer::{cursor, pointer};
 pub(crate) use preview::solo_layer;
 use preview::{composite_image, show_only};
 #[cfg(test)]
-use preview::{covering, preview_image};
+use preview::preview_image;
 pub use warp::{edit_session_warp, split};
 #[cfg(test)]
 use warp::{on_section_edge, single_patch, split_cursor, surface_at, warp_hit, warp_pointer};
