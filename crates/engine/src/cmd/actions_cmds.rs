@@ -79,15 +79,21 @@ impl Action {
 pub struct ActionsFile {
     pub version: u32,
     pub actions: Vec<Action>,
+    /// Action folders (paths, see [`folders`]); empty ones are only kept here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<String>,
 }
 
 pub const MAX_PLAYBACK_STEPS: u64 = 100_000;
 
-/// Actions list and the recording / playback flags. Only `list` is persisted.
+/// Actions list and the recording / playback flags. Only `list` and `folders` are persisted.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ActionState {
     pub list: Vec<Action>,
+    /// Action folders created with `actions.newFolder` (paths, see [`folders`]), kept so empty
+    /// ones stay. A folder an action names exists anyway.
+    pub folders: Vec<String>,
     /// Journal length when recording started, and the action index being recorded into.
     #[serde(skip)]
     pub recording: Option<(usize, usize)>,
@@ -684,7 +690,7 @@ fn set_color(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 pub fn specs() -> Vec<CommandSpec> {
-    vec![
+    let mut v = vec![
         CommandSpec {
             id: "actions.move",
             label: "Move Action or Step",
@@ -785,8 +791,12 @@ pub fn specs() -> Vec<CommandSpec> {
             run: set_color,
             journal: false,
         },
-    ]
+    ];
+    v.extend(folders::specs());
+    v
 }
+
+pub mod folders;
 
 #[cfg(test)]
 mod tests;

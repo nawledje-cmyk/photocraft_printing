@@ -736,7 +736,7 @@ fn set_folders_group_actions_and_collapse() {
     assert!(h.get_by_label("Also loose").rect().top() < folder.top());
     assert!(h.get_by_label("Sharpen").rect().top() > folder.top());
     assert!(h.get_by_label("Soften").rect().top() > h.get_by_label("Sharpen").rect().top());
-    assert_eq!(display_order(&[]), Vec::<usize>::new());
+    assert_eq!(tree_order(&[], &[], &[]), Vec::<Entry>::new());
     // Clicking the folder collapses it; its actions disappear and the state is remembered.
     h.get_by_label("Retouch").click();
     h.run_steps(3);
@@ -1284,4 +1284,53 @@ fn save_hook_closing_the_target_stops_an_imported_close_with_save() {
         assert_eq!(app.session.actions.playing, 0);
         assert!(app.session.actions.playback_stack.is_empty());
     }
+}
+
+/// Folders and subfolders: the tree nests rows under their folders, a collapsed folder hides its
+/// subfolders too, and Move to Folder files an action away.
+#[test]
+fn nested_folders_show_as_a_tree() {
+    use egui_kittest::{Harness, kittest::Queryable};
+    let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+    app.session.actions.list.push(Action::new("Loose", vec![]));
+    app.session.actions.list.push(Action::new("Glow", vec![]));
+    app.run("actions.newFolder", json!({"name": "Retouch"})).unwrap();
+    app.run("actions.newFolder", json!({"name": "Skin", "parent": "Retouch"})).unwrap();
+    app.run("actions.moveToFolder", json!({"action": "Glow", "folder": "Retouch/Skin"})).unwrap();
+    let rows: Vec<Row> = app
+        .session
+        .actions
+        .list
+        .iter()
+        .map(|a| Row { name: a.name.clone(), steps: vec![], disabled: Default::default(), dialogs: Default::default(), set: a.set.clone(), color: String::new() })
+        .collect();
+    let folders = photocraft_engine::actions_cmds::folders::all(&app.session.actions);
+    assert_eq!(
+        tree_order(&rows, &folders, &[]),
+        vec![
+            Entry::Action { index: 0, depth: 0 },
+            Entry::Folder { path: "Retouch".into(), depth: 0, count: 1 },
+            Entry::Folder { path: "Retouch/Skin".into(), depth: 1, count: 1 },
+            Entry::Action { index: 1, depth: 2 },
+        ]
+    );
+    assert_eq!(tree_order(&rows, &folders, &["Retouch".into()]).len(), 2, "a collapsed folder hides its subfolders");
+
+    let mut h = Harness::builder().with_size(vec2(400.0, 420.0)).build_ui_state(|ui, app| panel(app, ui), app);
+    h.run_steps(3);
+    let skin = h.get_by_label("Skin").rect();
+    assert!(h.get_by_label("Retouch").rect().top() < skin.top());
+    assert!(h.get_by_label("Glow").rect().top() > skin.top());
+    // Clicking a folder selects it; + Subfolder then makes one inside it.
+    h.get_by_label("Skin").click();
+    h.run_steps(3);
+    assert_eq!(h.state().ui.actions.selected_folder.as_deref(), Some("Retouch/Skin"));
+    h.get_by_label("+ Subfolder").click();
+    h.run_steps(3);
+    h.get_by_label("Name:");
+    h.state_mut().ui.actions.folder_prompt.as_mut().unwrap().text = "Eyes".into();
+    h.get_by_label("OK").click();
+    h.run_steps(3);
+    assert!(h.state().ui.actions.folder_prompt.is_none());
+    assert!(photocraft_engine::actions_cmds::folders::all(&h.state().session.actions).contains(&"Retouch/Skin/Eyes".to_string()));
 }

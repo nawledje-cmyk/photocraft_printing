@@ -582,6 +582,8 @@ pub struct Opened {
     pub warnings: Vec<String>,
     /// Recorded actions (`actions.json`). Empty when the file is missing or unreadable.
     pub actions: Vec<crate::actions_cmds::Action>,
+    /// Their folders, empty ones included (`actions.json`).
+    pub action_folders: Vec<String>,
     /// User patterns (`patterns.pat`), in library order. Empty when the file is missing or unreadable.
     pub patterns: Vec<photocraft_doc::Pattern>,
 }
@@ -659,7 +661,7 @@ pub fn open(backend: Box<dyn PresetBackend>) -> Opened {
 
     let loaded_actions = load_actions(backend.as_ref(), &mut warnings);
     let actions_skipped = loaded_actions.is_none();
-    let actions = loaded_actions.unwrap_or_default();
+    let (actions, action_folders) = loaded_actions.unwrap_or_default();
     let loaded_patterns = load_patterns(backend.as_ref(), &mut warnings);
     let patterns_skipped = loaded_patterns.is_none();
     let patterns = loaded_patterns.unwrap_or_default();
@@ -731,7 +733,7 @@ pub fn open(backend: Box<dyn PresetBackend>) -> Opened {
     let hidden_builtins = index.as_ref().map(|i| i.hidden_builtins.clone()).unwrap_or_default();
     let order = index.as_ref().map(|i| i.order.clone()).unwrap_or_default();
     store.index = index;
-    Opened { store, presets, hidden_builtins, order, warnings, actions, patterns }
+    Opened { store, presets, hidden_builtins, order, warnings, actions, action_folders, patterns }
 }
 
 /// `patterns.pat`: a missing file is no patterns. Anything else unreadable is a warning.
@@ -770,17 +772,17 @@ fn patterns_key(patterns: &[photocraft_doc::Pattern], pixels_rev: u64) -> u64 {
 
 /// `actions.json`: a missing file is an empty list. Anything else unreadable is a warning.
 /// The saved actions; `None` when `actions.json` exists but could not be loaded.
-fn load_actions(backend: &dyn PresetBackend, warnings: &mut Vec<String>) -> Option<Vec<crate::actions_cmds::Action>> {
+fn load_actions(backend: &dyn PresetBackend, warnings: &mut Vec<String>) -> Option<(Vec<crate::actions_cmds::Action>, Vec<String>)> {
     let bytes = match backend.read(ACTIONS_FILE, MAX_ACTIONS_BYTES) {
         Ok(b) => b,
-        Err(e) if missing_file(&e) => return Some(Vec::new()),
+        Err(e) if missing_file(&e) => return Some((Vec::new(), Vec::new())),
         Err(e) => {
             warnings.push(format!("actions: {ACTIONS_FILE} skipped: {e}"));
             return None;
         }
     };
     match serde_json::from_slice::<crate::actions_cmds::ActionsFile>(&bytes) {
-        Ok(file) if file.version == 1 => Some(file.actions),
+        Ok(file) if file.version == 1 => Some((file.actions, file.folders)),
         Ok(file) => {
             warnings.push(format!("actions: {ACTIONS_FILE} skipped: unsupported version {}", file.version));
             None
@@ -1100,7 +1102,7 @@ impl PresetStore {
     /// Write the Actions list when `rev` differs from the last load or write.
     /// An oversized list is warned once and not retried. An I/O error is warned and retried
     /// on the next command.
-    pub fn sync_actions(&mut self, list: &[crate::actions_cmds::Action], rev: u64) {
+    pub fn sync_actions(&mut self, list: &[crate::actions_cmds::Action], folders: &[String], rev: u64) {
         if self.actions_rev == rev {
             return;
         }
@@ -1109,7 +1111,7 @@ impl PresetStore {
             self.actions_rev = rev;
             return;
         }
-        let file = crate::actions_cmds::ActionsFile { version: 1, actions: list.to_vec() };
+        let file = crate::actions_cmds::ActionsFile { version: 1, actions: list.to_vec(), folders: folders.to_vec() };
         let bytes = match serde_json::to_vec_pretty(&file) {
             Ok(b) => b,
             Err(e) => {
@@ -1189,7 +1191,7 @@ impl Session {
     /// built-in of the same name; presets created before the store finished loading win), hide
     /// deleted built-ins, then sync. Returns the load warnings.
     pub fn attach_preset_store(&mut self, opened: Opened) -> Vec<String> {
-        let Opened { store, presets, hidden_builtins, order, mut warnings, actions: disk, patterns } = opened;
+        let Opened { store, presets, hidden_builtins, order, mut warnings, actions: disk, action_folders, patterns } = opened;
         // Saved patterns join the library after the built-ins, and a saved built-in (replaced by
         // an import or renamed) takes the shipped one's place; a pattern defined or imported
         // before the store finished loading keeps its place (and the same id isn't added twice).
@@ -1224,6 +1226,11 @@ impl Session {
         self.preset_store = Some(store);
         // In-memory actions (created before the store finished loading) win on name. Disk-only
         // names are appended. An empty session takes the disk list and does not rewrite it.
+        for f in action_folders {
+            if !self.actions.folders.contains(&f) {
+                self.actions.folders.push(f);
+            }
+        }
         if self.actions.list.is_empty() {
             self.actions.list = disk;
             self.actions.rev = 1;
@@ -1265,7 +1272,7 @@ impl Session {
                     self.tools.brush_changed();
                 }
             }
-            st.sync_actions(&self.actions.list, actions_rev);
+            st.sync_actions(&self.actions.list, &self.actions.folders, actions_rev);
             st.sync_patterns(&self.patterns.items, self.patterns.pixels_rev);
         }
     }

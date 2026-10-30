@@ -1122,3 +1122,83 @@ fn arrange_that_cannot_move_is_a_noop_in_playback() {
     assert_eq!(played["ran"], 0, "{played}");
     assert!(played["failed"].is_object(), "{played}");
 }
+
+/// Action folders nest: subfolders, renames that carry their contents, moves in and out, and a
+/// delete that takes the folder's actions and shortcuts with it.
+#[test]
+fn action_folders_nest_rename_move_and_delete() {
+    let mut s = Session::new();
+    s.actions.list.push(Action::new("Sharpen", vec![]));
+    s.actions.list.push(Action::new("Loose", vec![]));
+    assert_eq!(s.execute("actions.newFolder", json!({"name": "Retouch"})).unwrap()["folder"], "Retouch");
+    assert_eq!(s.execute("actions.newFolder", json!({"name": "Skin", "parent": "Retouch"})).unwrap()["folder"], "Retouch/Skin");
+    assert_eq!(folders::all(&s.actions), ["Retouch", "Retouch/Skin"], "an empty folder is kept");
+    s.execute("actions.moveToFolder", json!({"action": "Sharpen", "folder": "Retouch/Skin"})).unwrap();
+    assert_eq!(s.actions.list[0].set.as_deref(), Some("Retouch/Skin"));
+    s.edit_prefs(|p| p.shortcuts.insert(format!("{PLAY_SHORTCUT_PREFIX}Sharpen"), "Cmd+Alt+K".into()));
+
+    // Renaming a folder carries its subfolders and actions.
+    s.execute("actions.renameFolder", json!({"folder": "Retouch", "name": "Portraits"})).unwrap();
+    assert_eq!(folders::all(&s.actions), ["Portraits", "Portraits/Skin"]);
+    assert_eq!(s.actions.list[0].set.as_deref(), Some("Portraits/Skin"));
+
+    // Moving out leaves the folder (empty) in place; moving back in works.
+    s.execute("actions.moveToFolder", json!({"action": "Sharpen", "folder": null})).unwrap();
+    assert_eq!(s.actions.list[0].set, None);
+    assert!(folders::all(&s.actions).contains(&"Portraits/Skin".to_string()));
+    s.execute("actions.moveToFolder", json!({"action": "Sharpen", "folder": "Portraits/Skin"})).unwrap();
+
+    // Deleting the top folder takes the subfolder, its action and the action's shortcut.
+    let r = s.execute("actions.deleteFolder", json!({"folder": "Portraits"})).unwrap();
+    assert_eq!(r["actions"], json!(["Sharpen"]));
+    assert!(folders::all(&s.actions).is_empty());
+    assert_eq!(s.actions.list.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Loose"]);
+    assert!(!s.prefs().shortcuts.contains_key(&format!("{PLAY_SHORTCUT_PREFIX}Sharpen")));
+}
+
+/// Bad folder params are errors, never panics.
+#[test]
+fn action_folder_commands_reject_bad_params() {
+    let mut s = Session::new();
+    s.actions.list.push(Action::new("A", vec![]));
+    s.execute("actions.newFolder", json!({"name": "One"})).unwrap();
+    for (id, p) in [
+        ("actions.newFolder", json!({})),
+        ("actions.newFolder", json!({"name": ""})),
+        ("actions.newFolder", json!({"name": "a/b"})),
+        ("actions.newFolder", json!({"name": "One"})),
+        ("actions.newFolder", json!({"name": "x", "parent": "Missing"})),
+        ("actions.newFolder", json!({"name": 3})),
+        ("actions.newFolder", json!({"name": "x".repeat(500)})),
+        ("actions.renameFolder", json!({"folder": "Missing", "name": "x"})),
+        ("actions.renameFolder", json!({"folder": "One"})),
+        ("actions.deleteFolder", json!({"folder": "Missing"})),
+        ("actions.deleteFolder", json!({})),
+        ("actions.moveToFolder", json!({"action": "A"})),
+        ("actions.moveToFolder", json!({"action": "A", "folder": "Missing"})),
+        ("actions.moveToFolder", json!({"action": "Nope", "folder": "One"})),
+        ("actions.moveToFolder", json!({"action": 7, "folder": null})),
+    ] {
+        assert!(s.execute(id, p.clone()).is_err(), "{id} {p}");
+    }
+    // Nesting stops at MAX_DEPTH.
+    let mut parent = "One".to_string();
+    for i in 0..folders::MAX_DEPTH + 2 {
+        match s.execute("actions.newFolder", json!({"name": format!("n{i}"), "parent": parent})) {
+            Ok(r) => parent = r["folder"].as_str().unwrap().to_string(),
+            Err(_) => break,
+        }
+    }
+    assert!(folders::depth(&parent) < folders::MAX_DEPTH);
+}
+
+/// Empty folders are saved with the actions and come back.
+#[test]
+fn action_folders_round_trip_through_actions_json() {
+    let file = ActionsFile { version: 1, actions: vec![Action::new("A", vec![])], folders: vec!["Empty".into(), "Empty/Inner".into()] };
+    let back: ActionsFile = serde_json::from_slice(&serde_json::to_vec(&file).unwrap()).unwrap();
+    assert_eq!(back, file);
+    // A file saved before folders existed still loads.
+    let old: ActionsFile = serde_json::from_value(json!({"version": 1, "actions": []})).unwrap();
+    assert!(old.folders.is_empty());
+}
