@@ -705,9 +705,14 @@ fn cmd_drag_floats_the_selected_pixels() {
     let steps = app.session.active().unwrap().history.past_len();
     tool_event(&mut app, ToolEvent::Down { x: 20.0, y: 20.0, pressure: 1.0 }, Modifiers::COMMAND);
     tool_event(&mut app, ToolEvent::Move { x: 35.0, y: 20.0, pressure: 1.0 }, Modifiers::COMMAND);
-    let (shown, _) = crate::move_ui::display_doc(&mut app, 0).expect("the piece shows at the pointer while dragging");
-    assert!(alpha(&shown, 12, 20) == 0.0 && alpha(&shown, 40, 20) == 1.0);
+    // While dragging, the canvas shows the layer with the hole and draws the piece over it
+    // (move_ui::draw_content), rather than compositing it at every offset.
+    let (shown, _) = crate::move_ui::display_doc(&mut app, 0).expect("the cut-out layer shows while dragging");
+    assert!(alpha(&shown, 12, 20) == 0.0 && alpha(&shown, 40, 20) == 0.0);
     tool_event(&mut app, ToolEvent::Up { x: 35.0, y: 20.0 }, Modifiers::COMMAND);
+    // Released, the piece is composited where it was dropped.
+    let (shown, _) = crate::move_ui::display_doc(&mut app, 0).expect("the piece shows where it was dropped");
+    assert!(alpha(&shown, 12, 20) == 0.0 && alpha(&shown, 40, 20) == 1.0);
     assert_eq!(offset(&app), Some((15, 0)));
     assert_eq!(alpha(&doc(&app), 12, 20), 1.0, "the document waits for the drop");
     // A plain drag on the piece moves it again.
@@ -1070,4 +1075,48 @@ fn size_readout_follows_the_ruler_unit() {
     assert_eq!(crate::canvas::readout_in(&ur, 72.0, [1644.0, 2659.0], r), ["58 cm".to_string(), "93.8 cm".to_string()]);
     ur.rulers = Unit::Millimeters;
     assert_eq!(crate::canvas::readout_in(&ur, 150.0, [1644.0, 2659.0], [0.0, 0.0, 3425.0, 100.0])[0], "579.97 mm");
+}
+
+/// A dragged floating piece is drawn over the canvas from a texture built once (no pixels move per
+/// frame), and only on a layer it looks the same on: a half-opaque layer composites each offset.
+#[test]
+fn a_dragged_floating_piece_is_drawn_over_the_canvas_when_it_can_be() {
+    use crate::canvas::{ToolEvent, ViewXform, tool_event};
+    let xf = ViewXform { rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)), zoom: 1.0, center: [40.0, 30.0], flip: false, rotation: 0.0, aspect: 1.0 };
+    let draw = |app: &mut PhotocraftApp| {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(egui::RawInput::default());
+        let painter = ctx.layer_painter(egui::LayerId::background());
+        crate::move_ui::draw_content(app, &painter, &xf);
+        let shapes = ctx.end_pass().shapes;
+        shapes.iter().filter(|s| matches!(s.shape, egui::epaint::Shape::Mesh(_))).count()
+    };
+    let (mut app, layer) = painted();
+    tool_event(&mut app, ToolEvent::Down { x: 20.0, y: 20.0, pressure: 1.0 }, Modifiers::COMMAND);
+    tool_event(&mut app, ToolEvent::Move { x: 30.0, y: 20.0, pressure: 1.0 }, Modifiers::COMMAND);
+    let (first, key) = crate::move_ui::display_doc(&mut app, 0).unwrap();
+    tool_event(&mut app, ToolEvent::Move { x: 50.0, y: 25.0, pressure: 1.0 }, Modifiers::COMMAND);
+    let (again, key_again) = crate::move_ui::display_doc(&mut app, 0).unwrap();
+    assert_eq!(key, key_again, "the document under the piece doesn't change while it moves");
+    assert!(std::sync::Arc::ptr_eq(&first, &again), "and isn't rebuilt");
+    assert_eq!(draw(&mut app), 1, "the piece is drawn over the canvas");
+    tool_event(&mut app, ToolEvent::Up { x: 50.0, y: 25.0 }, Modifiers::COMMAND);
+    assert_eq!(draw(&mut app), 0, "nothing extra is drawn once it's dropped");
+    app.run("select.drop", json!({})).unwrap();
+
+    // A half-opaque layer: the piece is composited at each offset, as before.
+    let (mut app, layer2) = painted();
+    let _ = layer;
+    app.session
+        .edit("opacity", |doc, _| {
+            doc.layer_mut(layer2).unwrap().opacity = 0.5;
+            Ok(())
+        })
+        .unwrap();
+    app.run("select.rect", json!({"x": 10, "y": 10, "width": 20, "height": 20})).unwrap();
+    tool_event(&mut app, ToolEvent::Down { x: 20.0, y: 20.0, pressure: 1.0 }, Modifiers::COMMAND);
+    tool_event(&mut app, ToolEvent::Move { x: 35.0, y: 20.0, pressure: 1.0 }, Modifiers::COMMAND);
+    let (shown, _) = crate::move_ui::display_doc(&mut app, 0).unwrap();
+    assert_eq!(shown.layer(layer2).unwrap().surface().unwrap().rgba(40, 20)[3], 1.0, "composited at the pointer");
+    assert_eq!(draw(&mut app), 0);
 }

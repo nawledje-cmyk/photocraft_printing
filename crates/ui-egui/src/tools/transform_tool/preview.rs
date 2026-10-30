@@ -72,7 +72,7 @@ fn preview_mask(l: &photocraft_doc::Layer, b: photocraft_geom::Rect) -> Option<c
 /// it, as in Photoshop, instead of the moving pixels covering the whole document. The canvas
 /// under the box leaves them out ([`Above::hide_in`]). Built when the session starts and again
 /// when an edit changes the document; the box itself moves without re-compositing.
-pub(super) struct Above {
+pub(crate) struct Above {
     pub(super) ctx: egui::Context,
     pub(super) name: String,
     pub(super) max_side: usize,
@@ -83,7 +83,7 @@ pub(super) struct Above {
 }
 
 impl Above {
-    pub(super) fn new(ctx: &egui::Context, name: String, doc: &Document, id: LayerId, max_side: usize) -> Self {
+    pub(crate) fn new(ctx: &egui::Context, name: String, doc: &Document, id: LayerId, max_side: usize) -> Self {
         let mut a = Self { ctx: ctx.clone(), name, max_side, ids: Vec::new(), shown: None };
         a.rebuild(doc, id);
         a
@@ -109,7 +109,7 @@ impl Above {
     }
 
     /// Leave the covering layers out of `layers` (the document under the box).
-    pub(super) fn hide_in(&self, layers: &mut [photocraft_doc::Layer]) {
+    pub(crate) fn hide_in(&self, layers: &mut [photocraft_doc::Layer]) {
         for l in layers.iter_mut() {
             if self.ids.contains(&l.id) {
                 l.visible = false;
@@ -120,7 +120,7 @@ impl Above {
     }
 
     /// Draw the composite over the moving pixels.
-    pub(super) fn draw(&self, painter: &egui::Painter, xf: &ViewXform, display: Option<&photocraft_engine::display_color::CanvasDisplay>) {
+    pub(crate) fn draw(&self, painter: &egui::Painter, xf: &ViewXform, display: Option<&photocraft_engine::display_color::CanvasDisplay>) {
         let Some((texture, r)) = &self.shown else { return };
         let (tex, uv) = texture.pick_display(painter.ctx(), xf.zoom * painter.ctx().pixels_per_point(), 1.0, false, display);
         let mut mesh = egui::Mesh::with_texture(tex);
@@ -178,7 +178,7 @@ fn plain(l: &photocraft_doc::Layer) -> bool {
 /// stops the search, so it and everything under it stay in the document under the box as before
 /// (an adjustment there keeps applying to the layers under it). A clipping group goes as a whole,
 /// and the layers clipped to `id` (or to the group holding it) stay with it.
-pub(super) fn covering(layers: &[photocraft_doc::Layer], id: LayerId, out: &mut Vec<LayerId>) {
+pub(crate) fn covering(layers: &[photocraft_doc::Layer], id: LayerId, out: &mut Vec<LayerId>) {
     let mut end = layers.len();
     while end > 0 {
         // The clipping group ending at `end`: its base and the layers clipped to it.

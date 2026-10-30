@@ -29,6 +29,8 @@ mod draw;
 mod options_bar;
 mod pointer;
 mod preview;
+pub(crate) use draw::clip_to_canvas;
+pub(crate) use preview::{Above, covering};
 mod warp;
 
 pub(crate) use begin::begin_content_aware;
@@ -64,7 +66,7 @@ pub(crate) use pointer::{Gesture, Hit, hit, rotate_cursor_dir};
 use pointer::{accepts_outside_click, carry_pivot, near_rotate_corner, point_on_quad, rotation_degrees};
 pub use pointer::{cursor, pointer};
 pub(crate) use preview::solo_layer;
-use preview::{Above, composite_image, show_only};
+use preview::{composite_image, show_only};
 #[cfg(test)]
 use preview::{covering, preview_image};
 pub use warp::{edit_session_warp, split};

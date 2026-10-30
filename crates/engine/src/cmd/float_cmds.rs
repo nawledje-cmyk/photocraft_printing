@@ -103,6 +103,30 @@ impl CutParts {
         self.outline.as_ref()
     }
 
+    /// The cut pixels, where they were cut, and the area they cover (empty when nothing was cut).
+    pub fn piece(&self) -> (&Surface, photocraft_geom::Rect) {
+        (&self.piece, self.piece_bounds)
+    }
+
+    /// Whether the pieces are the layer's mask rather than its pixels.
+    pub fn is_mask(&self) -> bool {
+        self.mask
+    }
+
+    /// `doc` with the cut-out layer and no piece over it: what a live drag shows under the piece,
+    /// which the canvas then draws on its own at the pointer.
+    pub fn without_piece(&self, doc: &Document) -> Result<Document> {
+        let mut d = doc.clone();
+        let l = d.layer_mut(self.layer).ok_or(EngineError::NoLayer(self.layer))?;
+        let surf = if self.mask {
+            l.mask.as_mut().map(|m| &mut m.surface).ok_or_else(|| EngineError::Other("the layer has no mask".into()))?
+        } else {
+            l.surface_mut().ok_or_else(|| EngineError::Other("the layer has no pixels to move".into()))?
+        };
+        *surf = self.rest.clone();
+        Ok(d)
+    }
+
     /// `doc` with the piece moved by whole pixels (dx, dy) over the cut-out layer.
     pub fn moved(&self, doc: &Document, dx: i32, dy: i32) -> Result<Document> {
         let mut d = doc.clone();
