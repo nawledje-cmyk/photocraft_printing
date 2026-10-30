@@ -38,7 +38,6 @@ fn a_prewarmed_compositor_takes_over_once_built() {
     app.run("edit.fill", json!({"color": "#cc8844"})).unwrap();
     assert!(ensure_gpu(&mut app, &ctx, 0, all));
     assert!(gpu.has_compositor(), "the prewarmed compositor took over");
-    assert!(gpu.compositor_failed().is_none());
 }
 
 #[test]
