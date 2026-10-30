@@ -764,7 +764,7 @@ pub fn body(app: &mut crate::PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<Strin
                 let mode = get_s(f, "mode", "rgb");
                 let space = color_mode_of(&mode).map(photocraft_engine::color_cmds::mode_space);
                 let working = color_mode_of(&mode).map(|m| app.session.color.working(m).description.clone()).unwrap_or_default();
-                let installed = photocraft_engine::installed_profiles::installed();
+                let installed = crate::dialogs::installed_profiles(ui.ctx());
                 let opts = profile_options(space, &working, &installed);
                 let mut profile = get_s(f, "profile", "working");
                 if !opts.iter().any(|(v, _)| *v == profile) {

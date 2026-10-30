@@ -111,25 +111,79 @@ fn read_one(path: &Path) -> Option<InstalledProfile> {
     Some(InstalledProfile { path, description, class: p.class, color_space: p.color_space })
 }
 
-/// How long a scan is reused: dialogs ask every frame, and a newly installed profile shows up
-/// within this long.
-const FRESH: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long a scan is reused before it is refreshed in the background. A newly installed
+/// profile shows up within this long.
+const FRESH: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// The installed profiles (cached; see [`FRESH`]). Empty on the web.
+#[derive(Default)]
+struct Cache {
+    at: Option<std::time::Instant>,
+    list: Vec<InstalledProfile>,
+    scanning: bool,
+}
+
+fn cache() -> std::sync::MutexGuard<'static, Cache> {
+    static CACHE: std::sync::OnceLock<Mutex<Cache>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default).lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The installed profiles, without waiting: dialogs ask every frame, and reading and parsing
+/// every profile in the system folders (hundreds of files on Windows) took seconds on a slow
+/// laptop, freezing File › New and File › Print. A missing or stale list is scanned on a
+/// background thread; until it lands this returns the last list (empty at first, see
+/// [`scanning`]). Empty on the web.
 pub fn installed() -> Vec<InstalledProfile> {
     if cfg!(target_arch = "wasm32") {
         return Vec::new();
     }
-    type Cache = Mutex<Option<(std::time::Instant, Vec<InstalledProfile>)>>;
-    static CACHE: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
-    let cache = CACHE.get_or_init(Default::default);
-    if let Some((at, list)) = cache.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
-        && at.elapsed() < FRESH
+    let mut c = cache();
+    if !c.scanning && c.at.is_none_or(|at| at.elapsed() >= FRESH) {
+        c.scanning = true;
+        let spawned = std::thread::Builder::new().name("installed-profiles".into()).spawn(|| {
+            // Clears `scanning` however the scan ends, so a failure can't stop later refreshes.
+            struct Done;
+            impl Drop for Done {
+                fn drop(&mut self) {
+                    let mut c = cache();
+                    c.scanning = false;
+                    c.at = Some(std::time::Instant::now());
+                }
+            }
+            let _done = Done;
+            let list = scan(&profile_dirs());
+            cache().list = list;
+        });
+        if spawned.is_err() {
+            // No thread: try again after FRESH rather than on every frame.
+            c.scanning = false;
+            c.at = Some(std::time::Instant::now());
+        }
+    }
+    c.list.clone()
+}
+
+/// Whether a background scan for [`installed`] is running: a dialog listing profiles repaints
+/// until it lands.
+pub fn scanning() -> bool {
+    !cfg!(target_arch = "wasm32") && cache().scanning
+}
+
+/// The installed profiles, scanned now if the kept list is missing or stale: for
+/// `edit.installedProfiles`, whose callers want the complete answer.
+pub fn installed_now() -> Vec<InstalledProfile> {
+    if cfg!(target_arch = "wasm32") {
+        return Vec::new();
+    }
     {
-        return list.clone();
+        let c = cache();
+        if c.at.is_some_and(|at| at.elapsed() < FRESH) && !c.scanning {
+            return c.list.clone();
+        }
     }
     let list = scan(&profile_dirs());
-    *cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), list.clone()));
+    let mut c = cache();
+    c.list = list.clone();
+    c.at = Some(std::time::Instant::now());
     list
 }
 
@@ -162,7 +216,7 @@ fn list(_: &mut Session, p: &Value) -> Result<Value> {
         Some(Value::String(s)) if ["any", "rgb", "cmyk", "gray"].contains(&s.as_str()) => s,
         Some(v) => return Err(bad(format!("colorSpace is any|rgb|cmyk|gray, not {v}"))),
     };
-    let profiles: Vec<Value> = installed()
+    let profiles: Vec<Value> = installed_now()
         .into_iter()
         .filter(|i| class == "any" || class_id(i.class) == class)
         .filter(|i| space == "any" || space_id(i.color_space) == space)
@@ -236,5 +290,20 @@ mod tests {
         for bad in [json!({"class": 3}), json!({"class": "printer"}), json!({"colorSpace": "lab"}), json!({"colorSpace": []})] {
             assert!(s.execute("edit.installedProfiles", bad).is_err());
         }
+    }
+
+    /// File › New and File › Print ask every frame: the scan runs in the background, and the
+    /// answer it lands is the system's profiles.
+    #[test]
+    fn installed_scans_in_the_background_and_lands_the_scan() {
+        let _ = installed();
+        let start = std::time::Instant::now();
+        while scanning() {
+            assert!(start.elapsed() < std::time::Duration::from_secs(60), "the background scan never finished");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let paths = |l: Vec<InstalledProfile>| l.into_iter().map(|p| p.path).collect::<Vec<_>>();
+        assert_eq!(paths(installed()), paths(scan(&profile_dirs())));
+        assert_eq!(paths(installed_now()), paths(scan(&profile_dirs())));
     }
 }

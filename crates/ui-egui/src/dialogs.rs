@@ -14,6 +14,17 @@ pub(crate) const BROWSE_FIELD: &str = "__browse";
 /// A text field that names a folder: an export's `dir`, and the source (`input`) and destination
 /// (`output`) folders of Image Processor, Batch, Lens Correction, Contact Sheet and Create
 /// Droplet, which Photoshop picks with Select Folder… / Choose… (#9357).
+/// The system's installed colour profiles for a dialog's profile menu. They're scanned in the
+/// background ([`photocraft_engine::installed_profiles::installed`]); the dialog repaints until
+/// the scan lands, so the menu fills in without the user moving the mouse.
+pub(crate) fn installed_profiles(ctx: &egui::Context) -> Vec<photocraft_engine::installed_profiles::InstalledProfile> {
+    let list = photocraft_engine::installed_profiles::installed();
+    if photocraft_engine::installed_profiles::scanning() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+    }
+    list
+}
+
 pub(crate) fn is_folder_field(key: &str) -> bool {
     matches!(key, "dir" | "input" | "output")
 }

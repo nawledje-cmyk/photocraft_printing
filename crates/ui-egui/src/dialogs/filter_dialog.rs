@@ -908,7 +908,7 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
                     // system (printer and paper profiles, press conditions), by description.
                     let lists_installed = installed_filter(&cmd, &p.key).is_some();
                     let installed =
-                        if lists_installed { installed_choices(&cmd, &p.key, &photocraft_engine::installed_profiles::installed()) } else { Vec::new() };
+                        if lists_installed { installed_choices(&cmd, &p.key, &crate::dialogs::installed_profiles(ui.ctx())) } else { Vec::new() };
                     opts.extend(installed.iter().map(|(path, description)| (path.clone(), description.as_str())));
                     // Assign Profile: only what the document's colour mode can take (#4951).
                     if p.key == "profile"

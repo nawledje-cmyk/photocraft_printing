@@ -64,9 +64,14 @@ pub fn open_print(app: &mut PhotocraftApp) -> u64 {
     app.ui.open_dialog(DialogKind::Command, f)
 }
 
+/// The printer lists without waiting: the system's printers are listed on a background thread
+/// (see `print_cmds::start_printer_refresh`), and the dialog stays pending until they land.
 fn refresh_printers(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
-    if photocraft_engine::print_cmds::try_with_spooler(|| take_printer_lists(app, f)).is_some() {
+    let listed = photocraft_engine::print_cmds::try_with_spooler(|| take_printer_lists(app, f)).is_some();
+    if listed && !photocraft_engine::print_cmds::printers_refreshing() {
         f.remove("__printerListingPending");
+    } else if listed {
+        f.insert("__printerListingPending".into(), json!(true));
     } else {
         take_printer_lists(app, f);
         f.insert("__printerListingPending".into(), json!(true));
@@ -83,6 +88,8 @@ fn take_printer_lists(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
             let fallback = list.iter().find(|p| p.default).or(list.first()).map(|p| p.name.clone()).unwrap_or_default();
             f.insert("printer".into(), json!(fallback));
             f.remove("printerSettings");
+            // The new printer's paper, not the one read before the list arrived.
+            f.remove("__driverPageInitialized");
         }
     }
 }
@@ -317,7 +324,8 @@ pub(super) fn print_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map
         None
     };
     if printers.is_some() {
-        if !b(f, "__driverPageInitialized", false) {
+        // Until the printer list lands there's no printer to ask the driver about.
+        if !b(f, "__driverPageInitialized", false) && !b(f, "__printerListingPending", false) {
             if driver_page(f) {
                 f.insert("__driverPageInitialized".into(), json!(true));
             } else {
@@ -510,7 +518,7 @@ pub(super) fn print_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map
             if s(f, "colorHandling", "") == "photocraftManages" {
                 // Photoshop's Printer Profile menu: the built-ins, then every installed printer
                 // (output class) profile by its description.
-                let installed: Vec<_> = photocraft_engine::installed_profiles::installed()
+                let installed: Vec<_> = crate::dialogs::installed_profiles(ui.ctx())
                     .into_iter()
                     .filter(|p| p.is_destination() && p.class == photocraft_cms::ProfileClass::Output)
                     .collect();

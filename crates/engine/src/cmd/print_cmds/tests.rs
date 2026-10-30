@@ -849,6 +849,19 @@ fn listings_without_waiting_return_empty_when_no_list_was_cached() {
     uncached_listings_do_not_wait(false);
 }
 
+/// A stand-in source lists in place: no background refresh asks the system's spooler.
+#[test]
+fn a_stand_in_source_starts_no_background_listing() {
+    let mut s = Session::new();
+    s.printer_source = Some(test_printers());
+    let before = system_printer_listings();
+    start_printer_refresh(&s);
+    let listed = printers_without_waiting(&mut s);
+    assert!(!printers_refreshing() || system_printer_listings() == before);
+    assert_eq!(system_printer_listings(), before, "a stand-in session asked the system for its printers");
+    assert!(listed["printers"].as_array().is_some_and(|a| !a.is_empty()));
+}
+
 fn uncached_listings_do_not_wait(cache_other: bool) {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, mpsc};
