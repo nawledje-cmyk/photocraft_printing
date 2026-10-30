@@ -120,7 +120,6 @@ fn press_key(app: &mut PhotocraftApp, ctx: &egui::Context, key: egui::Key, modif
             Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers },
             Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers },
         ],
-        modifiers,
         ..Default::default()
     });
     crate::shortcuts::handle(app, ctx);
