@@ -574,6 +574,9 @@ fn main() -> eframe::Result {
                     && app.session.prefs().performance.effective_rendering_mode() != photocraft_engine::prefs::RenderingMode::Cpu
                 {
                     app.set_wgpu(rs);
+                    // Compile the GPU compositor's shaders now, in the background, instead of
+                    // when the first document is drawn (seconds on DX12).
+                    app.prewarm_gpu_compositor();
                 } else {
                     // The window still draws with wgpu: record its errors instead of panicking,
                     // and notice when the device is lost (#3438).

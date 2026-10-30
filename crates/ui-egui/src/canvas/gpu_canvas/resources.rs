@@ -26,6 +26,10 @@ pub(super) struct Resources {
     pub(super) compositor: Option<photocraft_gpu::Compositor>,
     /// Why the wgpu compositor couldn't be created (then the CPU compositor is used).
     pub(super) compositor_failed: Option<photocraft_gpu::Unsupported>,
+    /// The compositor [`super::GpuCanvas::prewarm_compositor`] builds in the background, once it
+    /// is built (or refused), and whether that build is still running.
+    pub(super) compositor_ready: std::sync::Arc<std::sync::Mutex<Option<Result<photocraft_gpu::Compositor, photocraft_gpu::Unsupported>>>>,
+    pub(super) compositor_building: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The device's health: the paint callback issues no GPU work once it's lost.
     pub(super) health: photocraft_gpu::DeviceHealth,
     /// GPU memory the compositor may hold (`None`: its default), and the document area the
@@ -360,6 +364,8 @@ impl Resources {
             separate_mip_targets: false,
             compositor: None,
             compositor_failed: None,
+            compositor_ready: Default::default(),
+            compositor_building: Default::default(),
             health: photocraft_gpu::DeviceHealth::new(),
             compositor_budget: None,
             layer_fit: None,

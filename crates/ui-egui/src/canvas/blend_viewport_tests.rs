@@ -15,6 +15,32 @@ fn render_state() -> Option<eframe::egui_wgpu::RenderState> {
     }
 }
 
+/// File › New on a dual-core DX12 laptop waited ~10 s for the compositor's shaders on the first
+/// draw. Prewarmed at launch, the first draw never waits for them (it composites on the CPU while
+/// they build), and the GPU compositor takes over once they're built.
+#[test]
+fn a_prewarmed_compositor_takes_over_once_built() {
+    let _guard = photocraft_testkit::gpu_lock();
+    let Some(rs) = render_state() else { return };
+    let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+    app.set_wgpu(rs);
+    app.prewarm_gpu_compositor();
+    let gpu = app.gpu.clone().unwrap();
+    app.run("file.new", json!({"width": 640, "height": 480, "background": "#336699"})).unwrap();
+    let ctx = egui::Context::default();
+    let all = DRect::new(0, 0, 640, 480);
+    assert!(ensure_gpu(&mut app, &ctx, 0, all), "the first draw shows the document either way");
+    let start = std::time::Instant::now();
+    while gpu.compositor_building() {
+        assert!(start.elapsed() < std::time::Duration::from_secs(120), "the compositor build never finished");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    app.run("edit.fill", json!({"color": "#cc8844"})).unwrap();
+    assert!(ensure_gpu(&mut app, &ctx, 0, all));
+    assert!(gpu.has_compositor(), "the prewarmed compositor took over");
+    assert!(gpu.compositor_failed().is_none());
+}
+
 #[test]
 fn blend_hover_refresh_is_limited_to_visible_canvas() {
     check_blend_viewport(false, false);

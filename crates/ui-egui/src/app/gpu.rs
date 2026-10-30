@@ -33,6 +33,15 @@ impl PhotocraftApp {
         self.prefs_rt.gpu_style = None;
     }
 
+    /// Builds the GPU layer compositor in the background now (see
+    /// [`gpu_canvas::GpuCanvas::prewarm_compositor`]), so the first document doesn't wait for its
+    /// shaders. The desktop app calls it at launch.
+    pub fn prewarm_gpu_compositor(&self) {
+        if let Some(gpu) = &self.gpu {
+            gpu.prewarm_compositor();
+        }
+    }
+
     /// Whether the document canvas currently draws on the GPU (false on the CPU path, and after
     /// the device was lost).
     pub fn gpu_active(&self) -> bool {

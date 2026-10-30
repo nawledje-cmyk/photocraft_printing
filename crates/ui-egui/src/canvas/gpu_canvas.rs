@@ -191,6 +191,9 @@ pub fn supports_f16_canvas(adapter: &wgpu::Adapter) -> bool {
     f.allowed_usages.contains(usages) && f.flags.contains(wgpu::TextureFormatFeatureFlags::FILTERABLE)
 }
 
+/// Why a composite went to the CPU while [`GpuCanvas::prewarm_compositor`] is still compiling.
+const COMPOSITOR_BUILDING: &str = "the GPU compositor is still being built";
+
 impl GpuCanvas {
     /// Create pipelines and register resources with the egui renderer.
     pub fn new(rs: &RenderState) -> Self {
@@ -224,6 +227,54 @@ impl GpuCanvas {
             vram.map_or_else(|| "unknown".to_owned(), |b| format!("{} MB", b >> 20))
         );
         Self { rs: rs.clone(), tile, high, health, vram, canvas_budget: budget, camera_raw: Default::default(), camera_raw_started: Default::default() }
+    }
+
+    /// Builds the wgpu layer compositor on a background thread now, rather than on the first
+    /// composite. Its ~30 pipelines compile one at a time under DX12's FXC (#6419): on a
+    /// dual-core laptop that froze File › New for about 10 s. Started at launch, it is usually
+    /// ready before the first document; until it is, documents composite on the CPU.
+    pub fn prewarm_compositor(&self) {
+        if std::env::var_os("PHOTOCRAFT_CPU_COMPOSE").is_some() || self.fault().is_some() {
+            return;
+        }
+        let (ready, building) = {
+            let renderer = self.rs.renderer.read();
+            let Some(res) = renderer.callback_resources.get::<Resources>() else { return };
+            if res.compositor.is_some() || res.compositor_failed.is_some() || res.compositor_building.swap(true, Ordering::AcqRel) {
+                return;
+            }
+            (res.compositor_ready.clone(), res.compositor_building.clone())
+        };
+        let device = self.rs.device.clone();
+        let format = photocraft_gpu::Compositor::preferred_acc_format(&self.rs.adapter);
+        let flag = building.clone();
+        let spawned = std::thread::Builder::new().name("gpu-compositor".into()).spawn(move || {
+            // Clears the flag however the build ends (after the result lands), so a failure
+            // falls back to building on first use instead of waiting forever.
+            struct Done(std::sync::Arc<std::sync::atomic::AtomicBool>);
+            impl Drop for Done {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::Release);
+                }
+            }
+            let _done = Done(flag);
+            let built = photocraft_gpu::Compositor::try_new_with_format(&device, format);
+            *ready.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(built);
+        });
+        if spawned.is_err() {
+            building.store(false, Ordering::Release);
+        }
+    }
+
+    /// Whether the wgpu layer compositor is built and installed.
+    #[cfg(test)]
+    pub(crate) fn has_compositor(&self) -> bool {
+        self.rs.renderer.read().callback_resources.get::<Resources>().is_some_and(|r| r.compositor.is_some())
+    }
+
+    /// Whether [`Self::prewarm_compositor`] is still building.
+    pub fn compositor_building(&self) -> bool {
+        self.rs.renderer.read().callback_resources.get::<Resources>().is_some_and(|r| r.compositor_building.load(Ordering::Acquire))
     }
 
     /// The device's health flag (shared with the wgpu compositor and the paint callback).
@@ -599,9 +650,19 @@ impl GpuCanvas {
         if let Some(e) = &res.compositor_failed {
             return Err(e.clone());
         }
-        let mut comp = match res.compositor.take() {
-            Some(c) => c,
-            None => match photocraft_gpu::Compositor::try_new_with_format(device, photocraft_gpu::Compositor::preferred_acc_format(&self.rs.adapter)) {
+        let prewarmed = res.compositor_ready.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        let mut comp = match (res.compositor.take(), prewarmed) {
+            (Some(c), _) | (None, Some(Ok(c))) => c,
+            (None, Some(Err(e))) => {
+                res.compositor_failed = Some(e.clone());
+                return Err(e);
+            }
+            // Still compiling in the background: this frame composites on the CPU rather than
+            // waiting for the shaders, and the GPU takes over once they're built.
+            (None, None) if res.compositor_building.load(Ordering::Acquire) => {
+                return Err(photocraft_gpu::Unsupported(COMPOSITOR_BUILDING.into()));
+            }
+            (None, None) => match photocraft_gpu::Compositor::try_new_with_format(device, photocraft_gpu::Compositor::preferred_acc_format(&self.rs.adapter)) {
                 Ok(c) => c,
                 Err(e) => {
                     // `render_path::note` logs it, once, as this document's reason.
