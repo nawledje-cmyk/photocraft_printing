@@ -153,7 +153,7 @@ fn shortcut_capture_window(app: &mut PhotocraftApp, ctx: &egui::Context) {
     let reserved = cap.key.as_deref().is_some_and(|k| !k.is_empty() && crate::prefs_ui::reserved_shortcut(k));
     let owner = cap.key.as_deref().filter(|k| !k.is_empty() && *k != current).and_then(|k| shortcut_owner(app, &cap.name, k));
     let t = Tokens::get(ctx);
-    egui::Modal::new(egui::Id::new("action-shortcut-capture")).show(ctx, |ui| {
+    egui::Modal::new(egui::Id::unique("action-shortcut-capture")).show(ctx, |ui| {
         ui.set_width(360.0);
         ui.heading(tl!("Action Shortcut"));
         ui.label(egui::RichText::new(&cap.name).color(t.text_dim));
@@ -1016,8 +1016,9 @@ fn action_context_menu(app: &mut PhotocraftApp, response: &egui::Response, index
         // Photoshop's Action Options: a function key, with Shift and Command (#7646).
         let (key, mut shift, mut command) = photocraft_engine::atn_cmds::parse_function_key(&current).unwrap_or((0, false, false));
         let custom = key == 0 && !current.is_empty();
-        if custom {
-            ui.selectable_label(true, crate::shortcuts::pretty(&current));
+        if custom && ui.selectable_label(true, crate::shortcuts::pretty(&current)).clicked() {
+            begin_shortcut_capture(app, ui.ctx(), name);
+            ui.close();
         }
         for number in std::iter::once(0).chain(1..=12) {
             let label = if number == 0 { tl!("None").to_string() } else { format!("F{number}") };
