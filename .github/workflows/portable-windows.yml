@@ -1,0 +1,75 @@
+name: Portable Windows build
+
+# Builds the 64-bit Windows desktop app as a portable download (no installer) and publishes it
+# as the `portable-latest` release of this repository, replacing the previous one.
+on:
+  push:
+    branches: [custom-action-shortcuts]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: portable-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  portable:
+    name: build (windows x64 portable)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      # Link the C runtime statically so the .exe runs on a clean Windows 10 without the
+      # Visual C++ redistributable.
+      RUSTFLAGS: -C target-feature=+crt-static
+      CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check out craft-fonts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: storytold/craft-fonts
+          ref: b076417b5880bd4154bd22f00695b1d28c6bea83
+          path: craft-fonts
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-on-failure: true
+
+      - name: Build
+        run: cargo build --release --locked -p photocraft
+        shell: bash
+
+      - name: Package
+        shell: bash
+        run: |
+          out=PhotoCraft-Portable-win64
+          mkdir "$out"
+          cp target/release/photocraft.exe "$out/"
+          # portable.txt beside the .exe keeps settings in a PhotoCraftData folder next to it.
+          cp packaging/windows/portable.txt "$out/"
+          7z a -tzip "$out.zip" "$out" > /dev/null
+          cp target/release/photocraft.exe "$out.exe"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: PhotoCraft-Portable-win64
+          path: PhotoCraft-Portable-win64.zip
+
+      - name: Publish download
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          gh release delete portable-latest --yes --cleanup-tag || true
+          gh release create portable-latest PhotoCraft-Portable-win64.zip PhotoCraft-Portable-win64.exe \
+            --target "$SHA" --prerelease --title "PhotoCraft portable (Windows 64-bit)" \
+            --notes "Portable Windows 10/11 64-bit build with custom action shortcuts (right-click an action > Custom Shortcut...). Download the .zip and unzip it to keep settings next to the app, or run the .exe on its own."
