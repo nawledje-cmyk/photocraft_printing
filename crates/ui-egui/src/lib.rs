@@ -327,6 +327,11 @@ pub struct PhotocraftApp {
     /// Documents drawn on the CPU only because the GPU compositor was still being built: redrawn
     /// on the GPU once it is, so "CPU Rendering" doesn't linger until the next edit.
     gpu_redo: std::collections::HashSet<DocId>,
+    /// Large GPU redraws in progress, a band a frame (`canvas::textures`): the document state they
+    /// draw and the bands still to draw, the visible ones first.
+    gpu_bands: HashMap<DocId, canvas::GpuBands>,
+    /// The display key (`canvas::display_doc`) each document's canvas showed last.
+    shown_raw_key: HashMap<DocId, u64>,
     /// Navigator textures belong to open documents, not the lifetime of the egui context.
     navigator_textures: HashMap<DocId, canvas::NavigatorCache>,
     /// `canvas::display_doc`'s live-adjust and Duotone documents per document: (snapshot,

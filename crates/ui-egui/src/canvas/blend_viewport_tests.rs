@@ -40,6 +40,53 @@ fn a_prewarmed_compositor_takes_over_once_built() {
     assert!(gpu.has_compositor(), "the prewarmed compositor took over");
 }
 
+/// A large redraw on the GPU is spread over frames, a band at a time, and once the bands are drawn
+/// the canvas shows exactly what one full redraw would.
+#[test]
+fn a_large_gpu_redraw_is_banded_and_ends_exact() {
+    let _guard = photocraft_testkit::gpu_lock();
+    let Some(rs) = render_state() else { return };
+    let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+    app.set_wgpu(rs);
+    app.run("file.new", json!({"width": 3000, "height": 1200, "background": "#336699"})).unwrap();
+    app.run("layer.new.layer", json!({})).unwrap();
+    let ctx = egui::Context::default();
+    let all = DRect::new(0, 0, 3000, 1200);
+    assert!(ensure_gpu(&mut app, &ctx, 0, all));
+    // Wait out a compositor still building, so the redraws below are GPU ones.
+    let gpu = app.gpu.clone().unwrap();
+    let start = std::time::Instant::now();
+    while gpu.compositor_building() && start.elapsed() < std::time::Duration::from_secs(120) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(ensure_gpu(&mut app, &ctx, 0, all));
+    // An edit of the whole layer: 3.6 MP, over the banding threshold.
+    app.run("edit.fill", json!({"color": "#cc8844"})).unwrap();
+    assert!(ensure_gpu(&mut app, &ctx, 0, all));
+    let id = app.session.active().unwrap().doc.id;
+    assert!(app.gpu_bands.contains_key(&id), "the redraw continues over frames");
+    let mut frames = 1;
+    while app.gpu_bands.contains_key(&id) {
+        assert!(frames < 50, "the bands never ended");
+        assert!(ensure_gpu(&mut app, &ctx, 0, all));
+        frames += 1;
+    }
+    assert!(frames > 1);
+    assert_visible_pixels(&mut app, all);
+    // A change while bands are pending starts the redraw over: nothing stale is left.
+    app.run("edit.fill", json!({"color": "#22aa55"})).unwrap();
+    assert!(ensure_gpu(&mut app, &ctx, 0, all));
+    app.run("edit.fill", json!({"color": "#aa2255"})).unwrap();
+    while app.gpu_bands.contains_key(&id) || frames < 60 {
+        assert!(ensure_gpu(&mut app, &ctx, 0, all));
+        frames += 1;
+        if !app.gpu_bands.contains_key(&id) {
+            break;
+        }
+    }
+    assert_visible_pixels(&mut app, all);
+}
+
 #[test]
 fn blend_hover_refresh_is_limited_to_visible_canvas() {
     check_blend_viewport(false, false);

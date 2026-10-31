@@ -497,6 +497,13 @@ pub(super) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
         damage = Some(crate::adjust_preview::live_switch_damage(app, raw_key, r, visible));
     }
     let preview_key = raw_key ^ display_key;
+    // A banded redraw of another state than this one: what it hadn't drawn yet is stale, so draw
+    // everything again (banded again where it may be).
+    if app.gpu_bands.get(&id).is_some_and(|b| (b.revision, b.key) != (revision, preview_key)) {
+        app.gpu_bands.remove(&id);
+        damage = None;
+    }
+    let shown_before = app.shown_raw_key.insert(id, raw_key).unwrap_or(raw_key);
     // The Navigator may draw this texture while it holds the plain document or a drag preview
     // that updates the full texture (not an adjustment preview composited only where the view is).
     if raw_key == 0 || navigator_waits_for_drag(app, idx) {
@@ -536,6 +543,27 @@ pub(super) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
         crate::render_path::layer_fit(app, fit);
     }
     if present && current {
+        // A banded redraw in progress: the next band (two when they're small).
+        if let Some(b) = app.gpu_bands.get_mut(&id) {
+            let mut next = Vec::new();
+            let mut px = 0u64;
+            while px < BAND_PX
+                && let Some(r) = (!b.bands.is_empty()).then(|| b.bands.remove(0))
+            {
+                px += r.width().max(0) as u64 * r.height().max(0) as u64;
+                next.push(r);
+            }
+            if b.bands.is_empty() {
+                app.gpu_bands.remove(&id);
+            } else {
+                ctx.request_repaint();
+            }
+            for r in next {
+                let r = gpu.refresh(id.0, &doc, Some(r), display.as_deref());
+                app.perf.record_refresh(&r);
+            }
+            return true;
+        }
         // An adjustment preview composited where the view was: catch up where it moved to.
         if let Some(r) = crate::adjust_preview::uncovered(app, id, raw_key, visible) {
             let r = gpu.refresh(id.0, &doc, Some(r), display.as_deref());
@@ -569,6 +597,24 @@ pub(super) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
     gpu_budget(app, &gpu, idx, partial, visible);
     app.perf.stage.damage_ms += crate::gpu_canvas::now_ms() - budget_start;
     let defer = crate::background_redraw::enabled(app);
+    // A large redraw on the GPU is spread over frames, a band at a time, the visible bands first,
+    // so no frame stalls on it (on a dual-core laptop with a GeForce 940MX a full redraw of a
+    // Letter page at 300 ppi took 50–100 ms in one frame). Only where the bands can't show: not
+    // while the pointer drags (live previews must follow it), and only for an edit of the same
+    // view or the start of a transform (its box covers what changes), not the end of one.
+    let region = if partial { damage.unwrap_or(doc.bounds()) } else { doc.bounds() }.intersect(&doc.bounds());
+    let same_view = shown_before == raw_key || (plain_key(shown_before) && transform_key(raw_key));
+    let banded = present && same_view && !ctx.input(|i| i.pointer.any_down()) && area(region) > BAND_TRIGGER_PX;
+    if banded {
+        let mut bands = split_bands(region, visible);
+        let first = bands.remove(0);
+        if !bands.is_empty() {
+            app.gpu_bands.insert(id, crate::canvas::GpuBands { revision, key: preview_key, bands });
+            ctx.request_repaint();
+        }
+        damage = Some(first);
+    }
+    let partial = partial || banded;
     let r = gpu.refresh_with(id.0, &doc, if partial { damage } else { None }, display.as_deref(), defer);
     app.perf.gpu_layer_fit = gpu.layer_fit();
     if r.kind == "lost" || r.kind == crate::gpu_canvas::REFRESH_OVER_BUDGET {
@@ -700,5 +746,70 @@ pub(crate) fn retain_gpu_documents(app: &mut PhotocraftApp) {
     if app.proxy_uploaded.is_some_and(|(doc, _)| !documents.iter().any(|st| st.doc.id == doc)) {
         app.proxy_uploaded = None;
         app.proxy = None;
+    }
+}
+
+/// Pixels a frame redraws of a banded redraw.
+const BAND_PX: u64 = 1_200_000;
+/// Redraws larger than this are banded.
+const BAND_TRIGGER_PX: u64 = 2_000_000;
+
+fn area(r: DRect) -> u64 {
+    r.width().max(0) as u64 * r.height().max(0) as u64
+}
+
+/// The plain document (or its Duotone display), not a preview.
+fn plain_key(k: u64) -> bool {
+    k == 0 || k == 1 << 41
+}
+
+/// A Free Transform session's preview document (`display_doc`).
+fn transform_key(k: u64) -> bool {
+    (1 << 40..1 << 41).contains(&k)
+}
+
+/// `region` in horizontal bands of about [`BAND_PX`], rows aligned to 256, the bands crossing
+/// `visible` first (nearest its middle first), then the rest top to bottom.
+fn split_bands(region: DRect, visible: DRect) -> Vec<DRect> {
+    let w = region.width().max(1) as u64;
+    let rows = ((BAND_PX / w).max(256) / 256 * 256) as i32;
+    let mut bands = Vec::new();
+    let mut y = region.y0;
+    while y < region.y1 {
+        let y1 = y.saturating_add(rows).min(region.y1);
+        bands.push(DRect::new(region.x0, y, region.x1, y1));
+        y = y1;
+    }
+    let mid = (visible.y0 + visible.y1) / 2;
+    bands.sort_by_key(|b| {
+        let seen = !b.intersect(&visible).is_empty();
+        (!seen, if seen { ((b.y0 + b.y1) / 2 - mid).abs() } else { b.y0 })
+    });
+    bands
+}
+
+#[cfg(test)]
+mod band_tests {
+    use super::*;
+
+    #[test]
+    fn bands_cover_the_region_once_visible_first() {
+        let region = DRect::new(0, 0, 2550, 3300);
+        let visible = DRect::new(0, 2000, 2550, 2600);
+        let bands = split_bands(region, visible);
+        assert!(bands.len() > 2);
+        assert!(bands.iter().all(|b| area(*b) <= BAND_PX + 2550 * 256), "{bands:?}");
+        assert_eq!(bands.iter().map(|b| area(*b)).sum::<u64>(), area(region), "every row once");
+        assert!(!bands[0].intersect(&visible).is_empty(), "the visible part first");
+        let mut ys: Vec<i32> = bands.iter().map(|b| b.y0).collect();
+        ys.sort_unstable();
+        ys.dedup();
+        assert_eq!(ys.len(), bands.len(), "no band twice");
+    }
+
+    #[test]
+    fn keys_tell_plain_documents_from_transform_previews() {
+        assert!(plain_key(0) && plain_key(1 << 41) && !plain_key(1 << 39));
+        assert!(transform_key((1 << 40) + 7) && !transform_key(0) && !transform_key((1 << 39) + 3));
     }
 }

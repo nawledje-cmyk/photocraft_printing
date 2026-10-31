@@ -40,6 +40,8 @@ impl PhotocraftApp {
             services,
             canvases: HashMap::new(),
             gpu_redo: Default::default(),
+            gpu_bands: Default::default(),
+            shown_raw_key: Default::default(),
             navigator_textures: HashMap::new(),
             display_memo: HashMap::new(),
             navigator_gpu: HashMap::new(),

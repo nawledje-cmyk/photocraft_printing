@@ -694,6 +694,13 @@ fn drag_and_drop_in_the_running_app() {
     pointer.set(h.state().drop_canvas_rect.expect("the canvas is shown").center());
     h.input_mut().dropped_files.push(dropped(file, Err("read from the path".into())));
     h.run_steps(2);
+    // With background jobs the file is decoded on another thread: wait for it to land.
+    let t = std::time::Instant::now();
+    while h.state().placing.is_some() && t.elapsed() < std::time::Duration::from_secs(30) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        h.step();
+    }
+    h.run_steps(2);
     assert_eq!(h.state().session.documents().len(), 3, "no new document");
     assert_eq!(h.state().session.active().unwrap().doc.layers.len(), layers + 1);
     assert_eq!(h.state().ui.transform.as_ref().and_then(|t| t.made), Some(crate::state::MadeLayer::Place));

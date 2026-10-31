@@ -122,6 +122,14 @@ use transform_controls::{transform_controls_hit, transform_controls_layers};
 pub use view_xform::{ViewXform, doc_point_at, fill_view, fit_view};
 use view_xform::{animated_view, wheel_anchor, zoom_about};
 
+/// A large GPU redraw spread over frames: the document revision and preview key it draws, and the
+/// bands still to draw.
+pub(crate) struct GpuBands {
+    pub(crate) revision: u64,
+    pub(crate) key: u64,
+    pub(crate) bands: Vec<DRect>,
+}
+
 pub struct CanvasCache {
     pub revision: u64,
     pub texture: Option<egui::TextureHandle>,

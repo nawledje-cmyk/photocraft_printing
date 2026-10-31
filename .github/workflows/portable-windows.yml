@@ -91,6 +91,18 @@ jobs:
           WGPU_DX12_COMPILER: dxc
           PHOTOCRAFT_TEST_FALLBACK_ADAPTER: "1"
 
+      # Large GPU redraws are drawn in bands over several frames; once the bands are drawn the canvas
+      # must match one full redraw. Checked on WARP (informational).
+      - name: Banded GPU redraws end exact (informational)
+        id: bands
+        continue-on-error: true
+        run: cargo test --locked -p photocraft-ui-egui --lib -- a_large_gpu_redraw_is_banded_and_ends_exact --nocapture
+        shell: bash
+        env:
+          WGPU_BACKEND: dx12
+          PHOTOCRAFT_REQUIRE_GPU_TESTS: "1"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+
       - name: Build
         run: cargo build --release --locked -p photocraft
         shell: bash
