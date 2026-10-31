@@ -389,13 +389,13 @@ fn shell_dialogs_are_listed_and_driven_through_ui_dialog() {
 
 #[test]
 fn opening_new_document_through_control_matches_clipboard_image_size() {
-    // #2034: every way of opening New Document uses the clipboard-aware initial fields.
-    let clipboard = std::sync::Arc::new(std::sync::Mutex::new(Some((100, 200, vec![255; 100 * 200 * 4]))));
-    let image = clipboard.clone();
-    let mut app = PhotocraftApp::new(
-        photocraft_engine::Session::new(),
-        crate::Services { clipboard_get_image: Some(Box::new(move || Ok(image.lock().unwrap().clone()))), ..Default::default() },
-    );
+    // #2034: every way of opening New Document uses the clipboard-aware initial fields. The
+    // Clipboard preset takes PhotoCraft's own clipboard (opening New doesn't read the OS
+    // clipboard, which froze the dialog decoding a large copied image; New from Clipboard does).
+    let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+    app.run("file.new", json!({"width": 300, "height": 300})).unwrap();
+    app.run("select.rect", json!({"x": 0, "y": 0, "width": 100, "height": 200})).unwrap();
+    app.run("edit.copy", json!({})).unwrap();
     let ctx = egui::Context::default();
     let opened = call(&mut app, &ctx, "ui.dialog.open", json!({"kind":"newDocument"}));
     assert_eq!(opened["ok"], true);
