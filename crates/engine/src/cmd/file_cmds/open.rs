@@ -202,6 +202,13 @@ pub struct PreparedPlace {
     size: (f64, f64),
 }
 
+impl PreparedPlace {
+    /// The pixels as they will be placed, in document coordinates.
+    pub fn pixels(&self) -> &photocraft_raster::Surface {
+        &self.px
+    }
+}
+
 /// Decode `bytes` (the file `name`) and size its pixels for the canvas `setup` describes: the slow
 /// part of placing, on any thread.
 pub fn prepare_place(setup: &PlaceSetup, name: &str, bytes: Vec<u8>, linked: Option<String>, p: &Value) -> Result<PreparedPlace> {

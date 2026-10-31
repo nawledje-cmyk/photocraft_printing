@@ -1159,3 +1159,4 @@ fn a_dropped_file_is_decoded_off_the_ui_thread() {
     assert_eq!(layer_count(&app), layers + 1);
     assert!(app.ui.notices.iter().any(|n| n.error));
 }
+

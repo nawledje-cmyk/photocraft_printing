@@ -99,6 +99,7 @@ impl PhotocraftApp {
             tab_strip: None,
             drop_places: Default::default(),
             placing: None,
+            placed_preview: None,
             view_docs: Vec::new(),
             fps: 0.0,
             last_frame_time: 0.0,

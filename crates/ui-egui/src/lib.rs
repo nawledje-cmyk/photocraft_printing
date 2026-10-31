@@ -464,6 +464,10 @@ pub struct PhotocraftApp {
     pub(crate) drop_places: std::collections::VecDeque<file_open::DropPlace>,
     /// A dropped file being decoded in the background, placed when it lands.
     pub(crate) placing: Option<file_open::Placing>,
+    /// The Free Transform preview texels of a dropped file, made with it in the background, and
+    /// the rectangle they cover: the box opening on the placed layer takes them instead of
+    /// reading its pixels again.
+    pub(crate) placed_preview: Option<(photocraft_geom::Rect, egui::ColorImage, [f32; 2])>,
     /// The document each of `ui.views` belongs to, as of the last [`Self::sync_views`].
     view_docs: Vec<DocId>,
     pub fps: f32,

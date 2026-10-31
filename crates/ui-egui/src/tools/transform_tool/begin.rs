@@ -69,7 +69,13 @@ pub fn begin(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String>
     // A blend mode (Multiply…) is shown by compositing onto the document under the box.
     let has_style = photocraft_compose::effects::has_effects(layer);
     let styled = crate::transform_fx::needs_composite(layer) && (lifted.is_none() || !has_style);
-    let (image, uv) = preview_image(&doc, id, lifted.as_ref(), b, max_side, styled);
+    // A file just placed by a drop brings its texels, made with it in the background, when they
+    // cover exactly this box (file_open::start_placing).
+    let prebuilt = app.placed_preview.take().filter(|(r, _, _)| *r == b && lifted.is_none() && !styled);
+    let (image, uv) = match prebuilt {
+        Some((_, image, uv)) => (image, uv),
+        None => preview_image(&doc, id, lifted.as_ref(), b, max_side, styled),
+    };
     let texture = crate::transform_tex::PreviewTextures::new(ctx, format!("transform-{session}"), image, uv);
     let pd = Arc::new(pd);
     app.transform_preview = Some(TransformPreview {

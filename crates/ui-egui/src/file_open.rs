@@ -43,8 +43,11 @@ enum PlaceSource {
 pub(crate) struct Placing {
     name: String,
     doc: photocraft_doc::DocId,
-    rx: std::sync::mpsc::Receiver<Result<photocraft_engine::file_cmds::PreparedPlace, String>>,
+    rx: std::sync::mpsc::Receiver<Result<(photocraft_engine::file_cmds::PreparedPlace, PlacedPreview), String>>,
 }
+
+/// A placed file's Free Transform preview texels and the rectangle they cover.
+type PlacedPreview = (photocraft_geom::Rect, egui::ColorImage, [f32; 2]);
 
 /// A file dropped on the canvas, waiting its turn to be placed.
 pub(crate) enum DropPlace {
@@ -389,13 +392,18 @@ impl PhotocraftApp {
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let (thread_name, repaint) = (name.clone(), ctx.clone());
+        // The Free Transform box opens on the placed layer: its preview texels are made here too.
+        let max_side = ctx.input(|i| i.max_texture_side).max(self.gpu.as_ref().map_or(1, |g| g.max_texture_side()));
         let work = move || {
             let result = (|| {
                 let bytes = match source {
                     PlaceSource::Path(path) => photocraft_engine::file_cmds::read_file(&path).map_err(|e| e.to_string())?,
                     PlaceSource::Bytes(bytes) => bytes,
                 };
-                photocraft_engine::file_cmds::prepare_place(&setup, &thread_name, bytes, None, &serde_json::json!({})).map_err(|e| e.to_string())
+                let prepared = photocraft_engine::file_cmds::prepare_place(&setup, &thread_name, bytes, None, &serde_json::json!({})).map_err(|e| e.to_string())?;
+                let bounds = prepared.pixels().content_bounds();
+                let (image, uv) = crate::transform_tex::read_surface(prepared.pixels(), None, bounds, max_side);
+                Ok((prepared, (bounds, image, uv)))
             })();
             let _ = tx.send(result);
             repaint.request_repaint();
@@ -428,20 +436,26 @@ impl PhotocraftApp {
         };
         let Some(Placing { name, doc, .. }) = self.placing.take() else { return true };
         // Placed into the document it was dropped on, when that's still the active one.
-        let placed = result.and_then(|prepared| {
+        let placed = result.and_then(|(prepared, preview)| {
             if self.session.active().map(|st| st.doc.id) != Some(doc) {
                 return Err("the document it was dropped on isn't active any more".into());
             }
+            self.placed_preview = Some(preview);
+            let t0 = crate::gpu_canvas::now_ms();
             let r = photocraft_engine::file_cmds::apply_place(&mut self.session, prepared).map_err(|e| e.to_string());
             self.sync_views();
+            self.perf.span("place: add the layer", crate::gpu_canvas::now_ms() - t0);
             r
         });
         match placed {
             Ok(_) => {
                 self.ui.status.clear();
+                let t0 = crate::gpu_canvas::now_ms();
                 if let Err(e) = crate::transform_tool::begin_placed(self, ctx) {
                     self.ui.status = e;
                 }
+                self.placed_preview = None;
+                self.perf.span("place: start Free Transform", crate::gpu_canvas::now_ms() - t0);
             }
             Err(e) => self.failed(crate::i18n::fmt(tl!("Couldn't place {name}: {error}"), &[("name", &name), ("error", &e)])),
         }
