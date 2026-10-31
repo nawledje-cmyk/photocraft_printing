@@ -43,6 +43,25 @@ jobs:
         with:
           cache-on-failure: true
 
+      # The compositor's shaders must build under DX12's FXC (the compiler GeForce/Intel laptops
+      # use): a shader FXC rejects leaves every layer composited on the CPU. Run on DX12's
+      # software adapter (WARP), which compiles with FXC.
+      - name: GPU compositor builds under DX12 (FXC)
+        run: cargo test --locked -p photocraft-gpu --test it compositor_builds
+        shell: bash
+        env:
+          WGPU_BACKEND: dx12
+          PHOTOCRAFT_TEST_FALLBACK_ADAPTER: "1"
+
+      # GPU results against the CPU compositor on WARP: reported, not blocking the download.
+      - name: GPU/CPU parity on DX12 (informational)
+        continue-on-error: true
+        run: cargo test --locked -p photocraft-gpu --test it parity
+        shell: bash
+        env:
+          WGPU_BACKEND: dx12
+          PHOTOCRAFT_TEST_FALLBACK_ADAPTER: "1"
+
       - name: Build
         run: cargo build --release --locked -p photocraft
         shell: bash

@@ -5,6 +5,7 @@
 static GPU_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 mod camera_raw;
+mod compositor_builds;
 mod device_loss;
 mod parity;
 mod pipeline_errors;
