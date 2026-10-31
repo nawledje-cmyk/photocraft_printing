@@ -868,7 +868,7 @@ struct DragRow {
 }
 
 /// Drops use an insertion line, converted to the final index expected by actions.move.
-fn drag_row(ui: &egui::Ui, response: &egui::Response, row: DragRow, t: &Tokens) -> Option<(DragRow, usize)> {
+fn drag_row(ui: &egui::Ui, response: &egui::Response, row: DragRow, t: &Tokens) -> Option<(DragRow, usize, usize)> {
     response.dnd_set_drag_payload(row);
     let source = response.dnd_hover_payload::<DragRow>()?;
     if source.step.is_some() != row.step.is_some() || (source.step.is_some() && source.action != row.action) {
@@ -881,10 +881,15 @@ fn drag_row(ui: &egui::Ui, response: &egui::Response, row: DragRow, t: &Tokens) 
     let to = if from < slot { slot.saturating_sub(1) } else { slot };
     let y = if after { response.rect.bottom() } else { response.rect.top() };
     ui.painter().line_segment([pos2(response.rect.left() + 22.0, y), pos2(response.rect.right(), y)], Stroke::new(2.0, t.accent));
-    response.dnd_release_payload::<DragRow>().map(|source| (*source, to))
+    // The row dropped on: an action dropped among actions takes that action's folder.
+    response.dnd_release_payload::<DragRow>().map(|source| (*source, to, row.action))
 }
 
-fn move_row(app: &mut PhotocraftApp, source: DragRow, to: usize) {
+fn move_row(app: &mut PhotocraftApp, source: DragRow, to: usize, target: usize) {
+    // The folder of the action dropped on, read before the list changes. The neighbour in the
+    // engine's flat list is often in another folder (the panel shows folders as a tree), which
+    // filed the action into the wrong one.
+    let folder = app.session.actions.list.get(target).map(|a| a.set.clone());
     let mut params = json!({"action": source.action, "to": to});
     if let Some(step) = source.step {
         params["step"] = json!(step);
@@ -903,11 +908,12 @@ fn move_row(app: &mut PhotocraftApp, source: DragRow, to: usize) {
         }
         app.ui.actions.selected = Some(to);
         app.ui.actions.selected_step = None;
-        // Dropped among another set's actions: the action joins that set (the row above wins).
-        let list = &app.session.actions.list;
-        let neighbour = to.checked_sub(1).and_then(|j| list.get(j)).or_else(|| list.get(to + 1)).and_then(|a| a.set.clone());
-        if list.get(to).is_some_and(|a| a.set != neighbour) {
-            let _ = app.run("actions.assignSet", json!({"action": to, "set": neighbour}));
+        app.ui.actions.picked.clear();
+        // Dropped among another folder's actions: the action joins that folder.
+        if let Some(folder) = folder
+            && app.session.actions.list.get(to).is_some_and(|a| a.set != folder)
+        {
+            let _ = app.run("actions.moveToFolder", json!({"action": to, "folder": folder}));
         }
     }
 }
@@ -1025,8 +1031,19 @@ struct SetHeaderResult {
     response: egui::Response,
     /// Where the name is drawn (the name field goes there while it's being named).
     name_rect: Rect,
-    /// What was dropped on the row: it goes inside the folder.
-    dropped: Option<Dropped>,
+    /// The disclosure arrow: a click there opens or closes the folder.
+    arrow_rect: Rect,
+    /// What was dropped on the row, and where: before, inside or after the folder.
+    dropped: Option<(Dropped, Zone)>,
+}
+
+/// Where on a folder row something is dropped: its top edge puts it before the folder, its
+/// bottom edge after (a closed folder), anywhere else inside.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Zone {
+    Before,
+    Into,
+    After,
 }
 
 /// Something dropped on a folder row: an action row (its index) or dragged items.
@@ -1060,6 +1077,7 @@ fn draw_set_header(
     }
     let rect = Rect::from_min_max(pos2(full.left() + depth as f32 * 14.0, full.top()), full.max);
     let triangle = Rect::from_center_size(pos2(rect.left() + 12.0, rect.center().y), vec2(8.0, 8.0));
+    let arrow_rect = Rect::from_min_max(pos2(rect.left(), full.top()), pos2(rect.left() + 22.0, full.bottom()));
     let points = if collapsed {
         vec![triangle.left_top(), triangle.right_center(), triangle.left_bottom()]
     } else {
@@ -1080,21 +1098,47 @@ fn draw_set_header(
         ui.painter().text(pos2(rect.left() + 44.0, rect.center().y), Align2::LEFT_CENTER, set, egui::FontId::proportional(12.0), tokens.text);
     }
     ui.painter().galley(pos2(full.right() - 8.0 - summary_galley.size().x, rect.center().y - summary_galley.size().y / 2.0), summary_galley, tokens.text_faint);
-    // An action (not a step) or dragged folders over the row drop into the folder.
+    // An action (not a step) dropped on the row goes inside the folder. Dragged folders go
+    // before it (the row's top edge), after it (the bottom edge of a closed folder: an open one's
+    // contents follow it) or inside it (the rest).
     let row = response.dnd_hover_payload::<DragRow>().is_some_and(|p| p.step.is_none());
     let picks = response.dnd_hover_payload::<organize::DragPicks>().is_some_and(|p| !p.0.iter().any(|q| matches!(q, organize::Pick::Folder(f) if photocraft_engine::actions_cmds::folders::within(path, f))));
+    let zone = {
+        let y = ui.input(|i| i.pointer.hover_pos()).map_or(full.center().y, |p| p.y);
+        let edge = full.height() * 0.3;
+        if !picks || row {
+            Zone::Into
+        } else if y < full.top() + edge {
+            Zone::Before
+        } else if y > full.bottom() - edge && collapsed {
+            Zone::After
+        } else {
+            Zone::Into
+        }
+    };
     if row || picks {
-        ui.painter().rect_stroke(full.shrink(1.0), 3.0, Stroke::new(2.0, tokens.accent), egui::StrokeKind::Inside);
+        let line = |y: f32| ui.painter().line_segment([pos2(rect.left() + 8.0, y), pos2(full.right(), y)], Stroke::new(2.0, tokens.accent));
+        match zone {
+            Zone::Before => {
+                line(full.top() + 1.0);
+            }
+            Zone::After => {
+                line(full.bottom() - 1.0);
+            }
+            Zone::Into => {
+                ui.painter().rect_stroke(full.shrink(1.0), 3.0, Stroke::new(2.0, tokens.accent), egui::StrokeKind::Inside);
+            }
+        }
     }
     // Take only the payload type being carried: taking another type drops the payload.
     let dropped = if egui::DragAndDrop::has_payload_of_type::<DragRow>(ui.ctx()) {
-        response.dnd_release_payload::<DragRow>().filter(|p| p.step.is_none()).map(|p| Dropped::Row(p.action))
+        response.dnd_release_payload::<DragRow>().filter(|p| p.step.is_none()).map(|p| (Dropped::Row(p.action), Zone::Into))
     } else if egui::DragAndDrop::has_payload_of_type::<organize::DragPicks>(ui.ctx()) {
-        response.dnd_release_payload::<organize::DragPicks>().map(|p| Dropped::Picks(p.0.clone()))
+        response.dnd_release_payload::<organize::DragPicks>().map(|p| (Dropped::Picks(p.0.clone()), zone))
     } else {
         None
     };
-    SetHeaderResult { response, name_rect, dropped }
+    SetHeaderResult { response, name_rect, arrow_rect, dropped }
 }
 
 fn action_context_menu(app: &mut PhotocraftApp, response: &egui::Response, index: usize, name: &str, swatch: &str) {
@@ -1208,6 +1252,7 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let mut set_toggled: Option<String> = None;
     let mut save_set: Option<String> = None;
     let mut dropped_in: Option<(Vec<organize::Pick>, Option<String>)> = None;
+    let mut placed: Option<(Vec<organize::Pick>, Option<String>, Option<String>)> = None;
     let max_h = (ui.available_height() - 38.0).max(0.0);
     let mut play_idx = None;
     let mut moved = None;
@@ -1249,9 +1294,13 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     if naming {
                         organize::rename_field(app, ui, &path, result.name_rect);
                     }
-                    if result.response.clicked() && organize::click(app, pick.clone(), mods, &order) {
-                        // A plain click also opens or closes the folder.
-                        set_toggled = Some(path.clone());
+                    if result.response.clicked() {
+                        if result.response.interact_pointer_pos().is_some_and(|p| result.arrow_rect.contains(p)) {
+                            // Only the arrow opens or closes the folder.
+                            set_toggled = Some(path.clone());
+                        } else {
+                            organize::click(app, pick.clone(), mods, &order);
+                        }
                     }
                     if result.response.double_clicked() && result.response.interact_pointer_pos().is_some_and(|p| result.name_rect.contains(p)) {
                         organize::start_rename(app, &path);
@@ -1268,13 +1317,26 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         }
                     });
                     match result.dropped {
-                        Some(Dropped::Row(index)) => {
+                        Some((Dropped::Row(index), _)) => {
                             // A dragged action that's selected brings the rest of the selection.
                             let name = rows.get(index).map(|r| r.name.clone()).unwrap_or_default();
                             let dragged = organize::Pick::Action(name);
                             dropped_in = Some((if chosen.contains(&dragged) { chosen.clone() } else { vec![dragged] }, Some(path.clone())));
                         }
-                        Some(Dropped::Picks(picks)) => dropped_in = Some((picks, Some(path.clone()))),
+                        Some((Dropped::Picks(picks), Zone::Into)) => dropped_in = Some((picks, Some(path.clone()))),
+                        Some((Dropped::Picks(picks), zone)) => {
+                            // Beside this folder, among its siblings: before it, or before the
+                            // next one after it (last when there is none).
+                            use photocraft_engine::actions_cmds::folders as f;
+                            let parent = f::parent(&path).map(str::to_string);
+                            let before = if zone == Zone::Before {
+                                Some(path.clone())
+                            } else {
+                                let siblings: Vec<&String> = folders.iter().filter(|x| f::parent(x) == parent.as_deref()).collect();
+                                siblings.iter().position(|x| **x == path).and_then(|i| siblings.get(i + 1)).map(|x| (*x).clone())
+                            };
+                            placed = Some((picks, parent, before));
+                        }
                         None => {}
                     }
                     continue;
@@ -1406,6 +1468,13 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     if let Some((action, step)) = dialog_toggled {
         let _ = app.run("actions.dialog", json!({"action": action, "step": step}));
     }
+    if let Some((picks, parent, before)) = placed {
+        // Dropped on a folder row's edge: beside that folder.
+        if let Err(e) = organize::place(app, &picks, parent, before) {
+            app.ui.status = e;
+            app.ui.status_error = true;
+        }
+    }
     if let Some((picks, target)) = dropped_in {
         // Dropped on a folder row (inside it, which opens) or the list's end (the top level).
         if let Err(e) = organize::move_into(app, &picks, target) {
@@ -1433,8 +1502,8 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     if let Some((index, name)) = renamed {
         rename_action(app, index, name);
     }
-    if let Some((source, to)) = moved {
-        move_row(app, source, to);
+    if let Some((source, to, target)) = moved {
+        move_row(app, source, to, target);
     }
     ui.add_space(4.0);
     ui.horizontal(|ui| {
@@ -1528,7 +1597,7 @@ struct StepRowsContext<'a> {
 
 #[derive(Default)]
 struct StepRowEvents {
-    moved: Option<(DragRow, usize)>,
+    moved: Option<(DragRow, usize, usize)>,
     toggled: Option<(usize, usize)>,
     dialog_toggled: Option<(usize, usize)>,
 }

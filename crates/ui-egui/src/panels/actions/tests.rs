@@ -737,13 +737,15 @@ fn set_folders_group_actions_and_collapse() {
     assert!(h.get_by_label("Sharpen").rect().top() > folder.top());
     assert!(h.get_by_label("Soften").rect().top() > h.get_by_label("Sharpen").rect().top());
     assert_eq!(tree_order(&[], &[], &[]), Vec::<Entry>::new());
-    // Clicking the folder collapses it; its actions disappear and the state is remembered.
-    h.get_by_label("Retouch").click();
+    // Clicking the folder's arrow collapses it; its actions disappear and the state is remembered.
+    let row = h.get_by_label("Retouch").rect();
+    click_point(&mut h, egui::pos2(row.left() + 10.0, row.center().y));
     h.run_steps(3);
     assert_eq!(h.state().ui.actions.collapsed_sets, ["Retouch"]);
     assert!(h.query_by_label("Sharpen").is_none());
     assert!(h.query_by_label("Loose").is_some());
-    h.get_by_label("Retouch").click();
+    let row = h.get_by_label("Retouch").rect();
+    click_point(&mut h, egui::pos2(row.left() + 10.0, row.center().y));
     h.run_steps(3);
     assert!(h.state().ui.actions.collapsed_sets.is_empty());
     assert!(h.query_by_label("Sharpen").is_some());
@@ -759,15 +761,73 @@ fn moving_an_action_next_to_another_set_joins_it() {
     app.session.actions.list.push(a);
     app.session.actions.list.push(b);
     app.session.actions.list.push(Action::new("C", vec![]));
-    // C dropped below B: it joins B's set, "Two".
-    move_row(&mut app, DragRow { action: 2, step: None }, 2);
+    // C dropped below B: it joins B's folder, "Two".
+    move_row(&mut app, DragRow { action: 2, step: None }, 2, 1);
     assert_eq!(app.session.actions.list[2].set.as_deref(), Some("Two"));
-    // B dropped to the top, above A: the row below decides when there is none above.
-    move_row(&mut app, DragRow { action: 1, step: None }, 0);
+    // B dropped above A: it joins A's folder.
+    move_row(&mut app, DragRow { action: 1, step: None }, 0, 0);
     assert_eq!((app.session.actions.list[0].name.as_str(), app.session.actions.list[0].set.as_deref()), ("B", Some("One")));
-    // C dropped between A (One) and nothing: the row above wins.
-    move_row(&mut app, DragRow { action: 2, step: None }, 2);
-    assert_eq!((app.session.actions.list[2].name.as_str(), app.session.actions.list[2].set.as_deref()), ("C", Some("One")));
+}
+
+/// The action dropped on decides the folder, not the neighbour in the engine's flat list: with a
+/// folder's action first in that list, an action dropped among top-level actions went into the
+/// first folder.
+#[test]
+fn an_action_dropped_among_top_level_actions_stays_at_the_top_level() {
+    let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+    let mut f = Action::new("In folder", vec![]);
+    f.set = Some("Folder".into());
+    app.session.actions.list.push(f);
+    app.session.actions.list.push(Action::new("X", vec![]));
+    app.session.actions.list.push(Action::new("Y", vec![]));
+    // Y dropped above X (the panel shows X, Y, then the folder).
+    move_row(&mut app, DragRow { action: 2, step: None }, 1, 1);
+    let y = app.session.actions.list.iter().find(|a| a.name == "Y").unwrap();
+    assert_eq!(y.set, None, "Y stays at the top level");
+    // Dropped on the folder's action, it joins the folder.
+    move_row(&mut app, DragRow { action: 1, step: None }, 0, 0);
+    let y = app.session.actions.list.iter().find(|a| a.name == "Y").unwrap();
+    assert_eq!(y.set.as_deref(), Some("Folder"));
+}
+
+/// Folder rows: only the arrow opens and closes a folder (a click on the name selects it), and a
+/// folder dropped on another's top edge goes before it, not inside.
+#[test]
+fn folder_arrow_toggles_and_edge_drops_reorder() {
+    use egui_kittest::{Harness, kittest::Queryable};
+    let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+    for n in ["One", "Two", "Three"] {
+        app.run("actions.newFolder", json!({"name": n})).unwrap();
+    }
+    // An action, so the list's empty-state hint isn't drawn.
+    app.session.actions.list.push(Action::new("Loose", vec![]));
+    let mut h = Harness::builder().with_size(vec2(400.0, 420.0)).build_ui_state(|ui, app| panel(app, ui), app);
+    h.run_steps(3);
+    // The name selects, without closing.
+    h.get_by_label("Two").click();
+    h.run_steps(2);
+    assert_eq!(h.state().ui.actions.selected_folder.as_deref(), Some("Two"));
+    assert!(h.state().ui.actions.collapsed_sets.is_empty(), "a click on the name doesn't close it");
+    // The arrow closes it.
+    let row = h.get_by_label("Two").rect();
+    click_point(&mut h, egui::pos2(row.left() + 10.0, row.center().y));
+    h.run_steps(2);
+    assert_eq!(h.state().ui.actions.collapsed_sets, ["Two"]);
+    // Drag "Three" onto the top edge of "One": it goes first, still at the top level.
+    let from = h.get_by_label("Three").rect().center();
+    let one = h.get_by_label("One").rect();
+    let to = egui::pos2(one.center().x, one.top() + 2.0);
+    h.event(egui::Event::PointerMoved(from));
+    h.run_steps(1);
+    h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.run_steps(1);
+    h.event(egui::Event::PointerMoved(from + vec2(10.0, 0.0)));
+    h.run_steps(2);
+    h.event(egui::Event::PointerMoved(to));
+    h.run_steps(2);
+    h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.run_steps(3);
+    assert_eq!(photocraft_engine::actions_cmds::folders::all(&h.state().session.actions), ["Three", "One", "Two"]);
 }
 
 #[test]
@@ -1474,4 +1534,14 @@ fn a_folder_dragged_onto_another_goes_inside() {
     h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
     h.run_steps(3);
     assert_eq!(names_in(h.state(), Some("Two/One")), ["A"]);
+}
+
+/// A plain click at `pos` (a point rather than a widget: a folder row's arrow).
+fn click_point(h: &mut egui_kittest::Harness<'_, PhotocraftApp>, pos: egui::Pos2) {
+    h.event(egui::Event::PointerMoved(pos));
+    h.run_steps(1);
+    h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.run_steps(1);
+    h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.run_steps(1);
 }

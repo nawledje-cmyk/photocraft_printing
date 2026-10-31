@@ -290,6 +290,34 @@ pub(crate) fn move_into(app: &mut PhotocraftApp, picks: &[Pick], target: Option<
     Ok(())
 }
 
+/// Put `picks` among the folders in `parent` (`None`: the top level): folders go just before
+/// `before` (a folder in `parent`), or after the others there; actions go into `parent`.
+pub(crate) fn place(app: &mut PhotocraftApp, picks: &[Pick], parent: Option<String>, before: Option<String>) -> Result<(), String> {
+    for r in roots(app, picks) {
+        match r {
+            Pick::Folder(f) => {
+                if parent.as_deref().is_some_and(|p| folders::within(p, &f)) || before.as_deref() == Some(f.as_str()) {
+                    continue;
+                }
+                let moved = app.run("actions.moveFolder", json!({"folder": f, "into": parent, "before": before}))?;
+                let new = moved["folder"].as_str().unwrap_or_default().to_string();
+                let ui = &mut app.ui.actions;
+                ui.collapsed_sets = ui.collapsed_sets.iter().map(|c| if folders::within(c, &f) { format!("{new}{}", &c[f.len()..]) } else { c.clone() }).collect();
+            }
+            Pick::Action(n) => {
+                if folder_of(app, &n) != parent {
+                    app.run("actions.moveToFolder", json!({"action": n, "folder": parent}))?;
+                }
+            }
+        }
+    }
+    if let Some(p) = &parent {
+        open(app, p);
+    }
+    clear(app);
+    Ok(())
+}
+
 /// New Folder: "New Folder" (or "New Folder 2"…) inside the selected folder, next to the
 /// selected action, or at the top level, selected and named where it shows.
 pub(crate) fn new_folder(app: &mut PhotocraftApp) {

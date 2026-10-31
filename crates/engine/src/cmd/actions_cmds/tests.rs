@@ -1225,3 +1225,27 @@ fn action_add_and_move_folder() {
     assert!(folders::all(&s.actions).contains(&"One".to_string()));
     assert!(folders::all(&s.actions).contains(&"Two".to_string()), "the emptied folder stays");
 }
+
+/// actions.moveFolder's "before" orders folders among their siblings, in the same parent or
+/// another one, carrying subfolders along.
+#[test]
+fn folders_reorder_before_a_sibling() {
+    let mut s = Session::new();
+    for n in ["A", "B", "C"] {
+        s.execute("actions.newFolder", json!({"name": n})).unwrap();
+    }
+    s.execute("actions.newFolder", json!({"name": "Inner", "parent": "C"})).unwrap();
+    let top = |s: &Session| folders::all(&s.actions).into_iter().filter(|f| folders::parent(f).is_none()).collect::<Vec<_>>();
+    // C (with Inner) before A, in the same parent.
+    s.execute("actions.moveFolder", json!({"folder": "C", "into": null, "before": "A"})).unwrap();
+    assert_eq!(top(&s), ["C", "A", "B"]);
+    assert_eq!(folders::all(&s.actions), ["C", "C/Inner", "A", "B"]);
+    // Last again without "before".
+    s.execute("actions.moveFolder", json!({"folder": "C", "into": null})).unwrap();
+    assert_eq!(top(&s), ["A", "B", "C"]);
+    // Into C, before Inner.
+    s.execute("actions.moveFolder", json!({"folder": "A", "into": "C", "before": "C/Inner"})).unwrap();
+    assert_eq!(folders::all(&s.actions), ["B", "C", "C/A", "C/Inner"]);
+    // "before" must sit in "into".
+    assert!(s.execute("actions.moveFolder", json!({"folder": "B", "into": null, "before": "C/Inner"})).is_err());
+}

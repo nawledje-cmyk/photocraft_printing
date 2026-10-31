@@ -253,7 +253,19 @@ fn move_folder(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(cmd, "a folder can't go inside itself"));
     }
     let new = join(into.as_deref(), leaf(&old));
+    // Where among its new siblings it goes: before this one, or last.
+    let before = match p.get("before") {
+        None | Some(Value::Null) => None,
+        Some(_) => {
+            let b = folder_param(s, cmd, p, "before", false)?.unwrap_or_default();
+            if parent(&b) != into.as_deref() {
+                return Err(bad(cmd, "\"before\" must be a folder inside \"into\""));
+            }
+            (!within(&b, &old)).then_some(b)
+        }
+    };
     if new == old {
+        place(s, &new, before.as_deref());
         return Ok(json!({"folder": new, "was": old}));
     }
     if all(&s.actions).contains(&new) {
@@ -273,8 +285,20 @@ fn move_folder(s: &mut Session, p: &Value) -> Result<Value> {
             a.set = Some(m);
         }
     }
-    s.actions.touch();
+    place(s, &new, before.as_deref());
     Ok(json!({"folder": new, "was": old}))
+}
+
+/// Put `folder` (with its subfolders) just before `before` in the folder order, or after every
+/// other folder. The panel lists a folder's subfolders in this order.
+fn place(s: &mut Session, folder: &str, before: Option<&str>) {
+    // Every folder in the kept list, in the order shown, so the order is the list's.
+    let mut order = all(&s.actions);
+    let (moving, mut rest): (Vec<String>, Vec<String>) = order.drain(..).partition(|f| within(f, folder));
+    let at = before.and_then(|b| rest.iter().position(|f| f == b)).unwrap_or(rest.len());
+    rest.splice(at..at, moving);
+    s.actions.folders = rest;
+    s.actions.touch();
 }
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -294,7 +318,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Move Action Folder",
             menu: &[],
             shortcut: None,
-            params: r##"{"folder":path, "into":path|null} → {folder, was}. Moves the folder, its subfolders and actions inside "into" (null: the top level). Not into itself or a folder of the same name."##,
+            params: r##"{"folder":path, "into":path|null, "before":path?} → {folder, was}. Moves the folder, its subfolders and actions inside "into" (null: the top level), placed before "before" (a folder in "into") or after the others there. Not into itself or next to a folder of the same name."##,
             enabled: always,
             run: move_folder,
             journal: false,
