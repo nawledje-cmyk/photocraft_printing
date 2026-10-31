@@ -88,6 +88,8 @@ pub(crate) struct MovePreview {
     /// Where `base` also differs from the document: the layers covering the piece, left out of
     /// it because they're drawn over the piece.
     above_area: Rect,
+    /// A whole layer dragged that way ([`layer_overlay_doc`]): its pixels and where they are.
+    source: Option<(photocraft_raster::Surface, Rect)>,
     /// The piece's textures for that drag, built on the first frame drawn ([`draw_content`]).
     overlay: Option<FloatOverlay>,
 }
@@ -160,7 +162,16 @@ pub(crate) fn display_doc(app: &mut PhotocraftApp, idx: usize) -> Option<(Arc<Do
         let moving = with_descendants(&doc, &ids);
         let bounds = bounds.map(|b| moving.iter().filter_map(|id| shape_reach(doc.layer(*id)?, canvas)).fold(b, |acc, r| acc.union(&r)));
         app.move_preview =
-            Some(MovePreview { doc: doc_id, revision, ids, moving, bounds, canvas, offsets: Vec::new(), shown: None, floating: false, base: None, above_area: Rect::EMPTY, overlay: None });
+            Some(MovePreview { doc: doc_id, revision, ids, moving, bounds, canvas, offsets: Vec::new(), shown: None, floating: false, base: None, above_area: Rect::EMPTY, source: None, overlay: None });
+    }
+    // One plain pixel layer dragged: the canvas shows the document without it (composited once)
+    // and draws its pixels over that at the pointer, instead of compositing every offset.
+    let started = app.move_preview.as_ref().is_some_and(|p| !p.floating && p.base.is_some());
+    if (started || offset != (0, 0))
+        && !mask_target
+        && let Some(shown) = layer_overlay_doc(app, idx)
+    {
+        return Some(shown);
     }
     let p = app.move_preview.as_mut()?;
     if offset == (0, 0) && p.offsets.is_empty() {
@@ -207,10 +218,15 @@ fn with_descendants(doc: &Document, ids: &[LayerId]) -> Vec<LayerId> {
 /// so its Layer Edges outline moves in lockstep with its pixels (#2413). `None` when it shows
 /// where it is.
 pub(crate) fn shown_layer_offset(app: &PhotocraftApp, doc: DocId, revision: u64, id: LayerId) -> Option<(i32, i32)> {
-    let p = app.move_preview.as_ref().filter(|p| p.doc == doc && p.revision == revision && !p.floating && p.shown.is_some())?;
+    let p = app.move_preview.as_ref().filter(|p| p.doc == doc && p.revision == revision && !p.floating)?;
     if !p.moving.contains(&id) {
         return None;
     }
+    // Drawn over the canvas at the drag's offset (layer_overlay_doc), or composited there.
+    if p.base.is_some() {
+        return drag_offset(app);
+    }
+    p.shown.as_ref()?;
     p.offsets.last().copied()
 }
 
@@ -245,6 +261,7 @@ fn floating_doc(app: &mut PhotocraftApp, idx: usize) -> Option<(Arc<Document>, u
             floating: true,
             base: None,
             above_area: Rect::EMPTY,
+            source: None,
             overlay: None,
         });
     }
@@ -284,6 +301,12 @@ fn floating_doc(app: &mut PhotocraftApp, idx: usize) -> Option<(Arc<Document>, u
 /// full opacity, in an 8-bit RGB or Grayscale document. Anything else keeps compositing each
 /// offset.
 fn overlay_fits(doc: &Document, id: LayerId, parts: &photocraft_engine::float_cmds::CutParts) -> bool {
+    !parts.is_mask() && !parts.piece().1.is_empty() && layer_fits(doc, id)
+}
+
+/// Whether layer `id` of `doc` looks the same drawn on its own over the rest as composited in
+/// place: see [`overlay_fits`].
+fn layer_fits(doc: &Document, id: LayerId) -> bool {
     use photocraft_color::{BlendMode, ColorMode, SampleType};
     fn plain(l: &photocraft_doc::Layer) -> bool {
         l.visible
@@ -310,11 +333,51 @@ fn overlay_fits(doc: &Document, id: LayerId, parts: &photocraft_engine::float_cm
         }
         None
     }
-    !parts.is_mask()
-        && matches!(doc.mode, ColorMode::Rgb | ColorMode::Grayscale)
-        && doc.depth == SampleType::U8
-        && !parts.piece().1.is_empty()
-        && fits(&doc.layers, id, 0).unwrap_or(false)
+    matches!(doc.mode, ColorMode::Rgb | ColorMode::Grayscale) && doc.depth == SampleType::U8 && fits(&doc.layers, id, 0).unwrap_or(false)
+}
+
+/// The document shown under a live Move drag of one plain pixel layer ([`layer_fits`]): the
+/// layer hidden, and the layers covering it (drawn over it by [`draw_content`]), built once per
+/// drag. `None` for anything else (several layers, a group, a shape or type layer, a mask).
+fn layer_overlay_doc(app: &mut PhotocraftApp, idx: usize) -> Option<(Arc<Document>, u64)> {
+    if let Some(p) = app.move_preview.as_ref().filter(|p| !p.floating && p.base.is_some()) {
+        return Some((p.base.clone()?, OVERLAY));
+    }
+    let st = app.session.documents().get(idx)?;
+    let p = app.move_preview.as_ref().filter(|p| !p.floating && p.doc == st.doc.id && p.revision == st.revision)?;
+    let [id] = p.ids.as_slice() else { return None };
+    let id = *id;
+    if p.moving.as_slice() != [id] || !layer_fits(&st.doc, id) {
+        return None;
+    }
+    let photocraft_doc::LayerContent::Raster(surf) = &st.doc.layer(id)?.content else { return None };
+    let bounds = surf.content_bounds();
+    if bounds.is_empty() {
+        return None;
+    }
+    let t0 = crate::gpu_canvas::now_ms();
+    let source = (surf.clone(), bounds);
+    let mut base = (*st.doc).clone();
+    if let Some(l) = base.layer_mut(id) {
+        l.visible = false;
+    }
+    let mut above = Vec::new();
+    crate::transform_tool::covering(&st.doc.layers, id, &mut above);
+    hide(&mut base.layers, &above);
+    let canvas = st.doc.bounds();
+    let above_area = above
+        .iter()
+        .filter_map(|id| st.doc.layer(*id))
+        .fold(Rect::EMPTY, |r, l| r.union(&photocraft_compose::composite_bounds(l, canvas).unwrap_or(canvas)))
+        .intersect(&canvas);
+    let base = Arc::new(base);
+    let p = app.move_preview.as_mut()?;
+    p.base = Some(base.clone());
+    p.above_area = above_area;
+    p.source = Some(source);
+    p.overlay = None;
+    app.perf.span("layer overlay", crate::gpu_canvas::now_ms() - t0);
+    Some((base, OVERLAY))
 }
 
 /// The document shown under a live drag of the floating piece on document `idx`, when the piece
@@ -364,19 +427,34 @@ fn hide(layers: &mut [photocraft_doc::Layer], ids: &[LayerId]) {
 /// Draw a floating piece being dragged over the canvas at the pointer ([`overlay_doc`]), with the
 /// layers covering it over it. Its textures are built on the first frame and reused after.
 pub(crate) fn draw_content(app: &mut PhotocraftApp, painter: &egui::Painter, xf: &crate::canvas::ViewXform) {
-    if !app.move_preview.as_ref().is_some_and(|p| p.floating && p.base.is_some()) || crate::canvas::selection_drag_delta(app).is_none() {
-        return;
-    }
-    let Some(offset) = floating_offset(app) else { return };
+    let Some(floating) = app.move_preview.as_ref().filter(|p| p.base.is_some()).map(|p| p.floating) else { return };
+    // A floating piece moves while its selection is dragged; a layer while the Move drag lasts.
+    let offset = if floating {
+        if crate::canvas::selection_drag_delta(app).is_none() {
+            return;
+        }
+        floating_offset(app)
+    } else {
+        drag_offset(app)
+    };
+    let Some(offset) = offset else { return };
     let Some(st) = app.session.active() else { return };
-    let Some(f) = photocraft_engine::float_cmds::floating(st) else { return };
-    let (doc, layer, parts) = (st.doc.clone(), f.layer, f.parts.clone());
+    let doc = st.doc.clone();
+    let (layer, source) = if floating {
+        let Some(f) = photocraft_engine::float_cmds::floating(st) else { return };
+        let (piece, bounds) = f.parts.piece();
+        (f.layer, (piece.clone(), bounds))
+    } else {
+        let Some(p) = app.move_preview.as_ref() else { return };
+        let (Some(id), Some(source)) = (p.ids.first().copied(), p.source.clone()) else { return };
+        (id, source)
+    };
     let ctx = painter.ctx().clone();
     let size = [doc.size.width as f32, doc.size.height as f32];
     if app.move_preview.as_ref().is_some_and(|p| p.overlay.is_none()) {
         let t0 = crate::gpu_canvas::now_ms();
         let max_side = ctx.input(|i| i.max_texture_side).max(app.gpu.as_ref().map_or(1, |g| g.max_texture_side()));
-        let (piece, bounds) = parts.piece();
+        let (piece, bounds) = (&source.0, source.1);
         let (image, uv) = crate::transform_tex::read_surface(piece, None, bounds, max_side);
         let texture = crate::transform_tex::PreviewTextures::new(&ctx, "floating-piece".into(), image, uv);
         let above = crate::transform_tool::Above::new(&ctx, "floating-above".into(), &doc, layer, max_side);
@@ -406,7 +484,7 @@ pub(crate) fn draw_content(app: &mut PhotocraftApp, painter: &egui::Painter, xf:
 /// isn't one of this drag's (the canvas then recomposites everything).
 pub(crate) fn damage(app: &PhotocraftApp, doc: DocId, revision: u64, seen: u64, now: u64) -> Option<Rect> {
     let p = app.move_preview.as_ref().filter(|p| p.doc == doc && p.revision == revision)?;
-    let ours = |k: u64| k == 0 || k >= BASE || (k == OVERLAY && p.floating);
+    let ours = |k: u64| k == 0 || k >= BASE || (k == OVERLAY && p.base.is_some());
     if seen == now || !ours(seen) || !ours(now) {
         return None;
     }
@@ -426,7 +504,7 @@ pub(crate) fn damage(app: &PhotocraftApp, doc: DocId, revision: u64, seen: u64, 
 
 /// Whether the canvas shows a Move drag's layers at the pointer.
 pub(crate) fn showing(app: &PhotocraftApp) -> bool {
-    app.move_preview.as_ref().is_some_and(|p| p.shown.is_some())
+    app.move_preview.as_ref().is_some_and(|p| p.shown.is_some() || (!p.floating && p.base.is_some()))
 }
 
 /// Whether `key` is a Move drag preview key.

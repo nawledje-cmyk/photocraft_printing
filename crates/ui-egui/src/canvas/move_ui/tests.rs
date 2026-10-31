@@ -13,7 +13,11 @@ fn dragging_a_layer_larger_than_the_canvas_redraws_what_comes_in_from_beyond_the
     app.session.execute("layer.new.layer", json!({})).unwrap();
     app.session
         .edit("paint", |doc, a| {
-            doc.layer_mut(a.unwrap()).unwrap().surface_mut().unwrap().fill_rect(Rect::new(-32, -32, 96, 96), &[1.0, 0.0, 0.0, 1.0]);
+            let l = doc.layer_mut(a.unwrap()).unwrap();
+            l.surface_mut().unwrap().fill_rect(Rect::new(-32, -32, 96, 96), &[1.0, 0.0, 0.0, 1.0]);
+            // Not fully opaque: composited at each offset (a plain layer is drawn over the canvas,
+            // see `a_plain_layer_drag_is_drawn_over_the_canvas`).
+            l.opacity = 0.9;
             Ok(())
         })
         .unwrap();
@@ -342,4 +346,51 @@ fn floating_selection_does_not_snap_to_its_own_starting_outline_or_preview_at_ze
     assert!(super::display_doc(&mut app, 0).is_some(), "preview is shown once offset is non-zero");
     crate::canvas::tool_event(&mut app, ToolEvent::Up { x: 18.0, y: 17.0 }, m);
     assert_eq!(offset(&app), Some((2, 1)));
+}
+
+/// Dragging one plain pixel layer with the Move tool: the canvas shows the document without it,
+/// composited once (one key for the whole drag), and the layer's pixels are drawn over it at the
+/// pointer; its outline follows; the release commits the move as before.
+#[test]
+fn a_plain_layer_drag_is_drawn_over_the_canvas() {
+    let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+    app.session.execute("file.new", json!({"width": 64, "height": 64})).unwrap();
+    app.sync_views();
+    app.session.execute("layer.new.layer", json!({})).unwrap();
+    app.session.execute("select.rect", json!({"x": 8, "y": 8, "width": 16, "height": 16})).unwrap();
+    app.session.execute("edit.fill", json!({"color": "#ff0000"})).unwrap();
+    app.session.execute("select.deselect", json!({})).unwrap();
+    let id = app.session.active().unwrap().active_layer.unwrap();
+    app.ui.tool = Tool::Move;
+    app.ui.extras.snap = false;
+    app.ui.view.show.smart_guides = false;
+    let m = egui::Modifiers::NONE;
+    crate::canvas::tool_event(&mut app, ToolEvent::Down { x: 16.0, y: 16.0, pressure: 1.0 }, m);
+    crate::canvas::tool_event(&mut app, ToolEvent::Move { x: 26.0, y: 16.0, pressure: 1.0 }, m);
+    let (first, key) = super::display_doc(&mut app, 0).unwrap();
+    assert!(!first.layer(id).unwrap().visible, "the layer is drawn over the canvas, not in it");
+    crate::canvas::tool_event(&mut app, ToolEvent::Move { x: 40.0, y: 20.0, pressure: 1.0 }, m);
+    let (again, key_again) = super::display_doc(&mut app, 0).unwrap();
+    assert_eq!(key, key_again);
+    assert!(std::sync::Arc::ptr_eq(&first, &again), "composited once for the whole drag");
+    assert!(super::showing(&app));
+    let st = app.session.active().unwrap();
+    assert_eq!(super::shown_layer_offset(&app, st.doc.id, st.revision, id), Some((24, 4)), "the outline follows");
+    // The first frame redraws where the layer was (it leaves the canvas for the overlay).
+    let r = super::damage(&app, st.doc.id, st.revision, 0, key).unwrap();
+    assert!(r.contains(8, 8) && r.contains(23, 23), "{r:?}");
+    // Drawn: one textured mesh.
+    let xf = crate::canvas::ViewXform { rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 640.0)), zoom: 1.0, center: [32.0, 32.0], flip: false, rotation: 0.0, aspect: 1.0 };
+    let ctx = egui::Context::default();
+    ctx.begin_pass(egui::RawInput::default());
+    let painter = ctx.layer_painter(egui::LayerId::background());
+    super::draw_content(&mut app, &painter, &xf);
+    let mut out = ctx.end_pass();
+    out.textures_delta.clear();
+    assert_eq!(out.shapes.iter().filter(|s| matches!(s.shape, egui::epaint::Shape::Mesh(_))).count(), 1);
+    // Released: committed where it was shown.
+    crate::canvas::tool_event(&mut app, ToolEvent::Up { x: 40.0, y: 20.0 }, m);
+    let d = &app.session.active().unwrap().doc;
+    let s = d.layer(id).unwrap().surface().unwrap();
+    assert!(s.pixel(8 + 24, 8 + 4)[3] > 0.5 && s.pixel(8, 8)[3] < 0.5, "moved by (24, 4)");
 }
