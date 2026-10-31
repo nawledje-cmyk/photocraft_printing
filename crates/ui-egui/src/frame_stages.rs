@@ -143,11 +143,84 @@ pub struct SlowFrames {
     /// When the last log line went out, and the slow frames since that weren't logged.
     logged_at: Option<f64>,
     unlogged: usize,
+    /// Every frame of the current minute, for the log's once-a-minute summary.
+    minute: Minute,
+}
+
+/// What the log's once-a-minute performance summary counts (frames are only drawn while
+/// something happens, so an idle minute logs nothing).
+#[derive(Debug, Default)]
+struct Minute {
+    start: Option<f64>,
+    frames: u32,
+    total_ms: f64,
+    slow: u32,
+    gpu: u32,
+    worst: Option<FrameStages>,
+}
+
+/// How often the summary is logged.
+const SUMMARY_EVERY_MS: f64 = 60_000.0;
+
+impl Minute {
+    fn add(&mut self, s: &FrameStages, slow: bool) -> Option<String> {
+        if s.frame_ms.is_nan() {
+            return None;
+        }
+        let start = *self.start.get_or_insert(s.t);
+        self.frames += 1;
+        self.total_ms += s.frame_ms;
+        self.slow += u32::from(slow);
+        self.gpu += u32::from(s.path == "gpu");
+        if self.worst.as_ref().is_none_or(|w| s.frame_ms > w.frame_ms) {
+            self.worst = Some(s.clone());
+        }
+        if s.t - start < SUMMARY_EVERY_MS {
+            return None;
+        }
+        let line = self.line();
+        *self = Minute::default();
+        line
+    }
+
+    /// "perf: last minute: …", naming the stage that took most of the worst frame.
+    fn line(&self) -> Option<String> {
+        let w = self.worst.as_ref()?;
+        let n = f64::from(self.frames.max(1));
+        let stages = [
+            ("input", w.input_ms),
+            ("command", w.command_ms),
+            ("damage", w.damage_ms),
+            ("composite", w.composite_ms),
+            ("upload", w.upload_ms),
+            ("gpu", w.gpu_ms.unwrap_or(0.0)),
+            ("present", w.present_ms.unwrap_or(0.0)),
+        ];
+        let (stage, ms) = stages.iter().fold(("", 0.0), |a, &(k, v)| if v > a.1 { (k, v) } else { a });
+        let command = if w.command.is_empty() { String::new() } else { format!(", command {}", w.command) };
+        Some(format!(
+            "perf: last minute: {} frames, average {:.1} ms, {} slow (over {SLOW_FRAME_MS:.0} ms), canvas on the GPU in {:.0}% of frames; worst {:.1} ms, mostly {stage} {ms:.1} ms{command}, refresh {} {} px",
+            self.frames,
+            self.total_ms / n,
+            self.slow,
+            f64::from(self.gpu) * 100.0 / n,
+            w.frame_ms,
+            if w.refresh.is_empty() { "none" } else { w.refresh },
+            w.refresh_px,
+        ))
+    }
 }
 
 impl Default for SlowFrames {
     fn default() -> Self {
-        Self { frames: VecDeque::with_capacity(SLOW_FRAMES), threshold_ms: SLOW_FRAME_MS, prev_ui_ms: None, logged_at: None, unlogged: 0 }
+        Self {
+            frames: VecDeque::with_capacity(SLOW_FRAMES),
+            threshold_ms: SLOW_FRAME_MS,
+            prev_ui_ms: None,
+            logged_at: None,
+            unlogged: 0,
+            minute: Minute::default(),
+        }
     }
 }
 
@@ -172,7 +245,11 @@ impl SlowFrames {
         s.gpu_ms = gpu_ms.filter(|_| on_gpu);
         s.present_ms = s.cpu_prev_ms.zip(self.prev_ui_ms).map(|(cpu, ui)| (cpu - ui).max(0.0));
         self.prev_ui_ms = Some(s.ui_ms);
+        let slow = !s.frame_ms.is_nan() && s.frame_ms > self.threshold_ms;
         if let Some(line) = self.push(&s) {
+            log::info!("{line}");
+        }
+        if let Some(line) = self.minute.add(&s, slow) {
             log::info!("{line}");
         }
         s
@@ -234,6 +311,21 @@ mod tests {
         let json = serde_json::to_value(&r).unwrap();
         assert_eq!(json.as_array().map(Vec::len), Some(SLOW_FRAMES));
         assert_eq!(json[0]["frameMs"], 96.0);
+    }
+
+    #[test]
+    fn a_minute_of_frames_is_summed_up_once() {
+        let mut m = Minute::default();
+        let mut lines = Vec::new();
+        for k in 0..=61 {
+            let t = f64::from(k) * 1000.0;
+            let mut f = frame(t, 0.0);
+            f.end(t + if k == 10 { 120.0 } else { 10.0 });
+            f.path = "gpu";
+            lines.extend(m.add(&f, k == 10));
+        }
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].starts_with("perf: last minute: 61 frames") && lines[0].contains("1 slow") && lines[0].contains("worst 120.0 ms"), "{}", lines[0]);
     }
 
     #[test]

@@ -33,6 +33,8 @@ use crate::{ControlResponse, ExportSettings, PhotocraftApp, SaveFileFn, notices}
 
 /// Delay before the modal progress dialog appears (quick jobs finish without it).
 pub const DIALOG_DELAY_MS: f64 = 250.0;
+/// The same for applying a Free Transform, which shows its result meanwhile.
+pub const TRANSFORM_DIALOG_DELAY_MS: f64 = 4000.0;
 
 /// A file opening in the background: shown as a document tab with progress.
 #[derive(Clone, Debug)]
@@ -740,6 +742,15 @@ pub fn dialog(app: &mut PhotocraftApp, ctx: &egui::Context) {
         None => {
             let Some(j) = app.session.active_job() else { return };
             if j.elapsed_ms < DIALOG_DELAY_MS || app.jobs.saves.iter().any(|s| s.job == j.id) {
+                return;
+            }
+            // Applying a Free Transform: the box keeps showing the result while the pixels are
+            // resampled, so the window would only interrupt. The status bar says so instead, and
+            // the window comes only if it takes long (to offer Cancel).
+            if crate::transform_tool::committing(app) == Some(j.id) && j.elapsed_ms < TRANSFORM_DIALOG_DELAY_MS {
+                app.ui.status = tl!("Applying transform…").to_string();
+                app.ui.status_error = false;
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
                 return;
             }
             j

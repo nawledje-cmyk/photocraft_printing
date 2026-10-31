@@ -62,6 +62,35 @@ jobs:
           WGPU_BACKEND: dx12
           PHOTOCRAFT_TEST_FALLBACK_ADAPTER: "1"
 
+      # Microsoft's DXC shader compiler, shipped beside the .exe: the app uses it instead of FXC,
+      # which took ~20 s to build the compositor's shaders at every start on a dual-core laptop.
+      # A failed download leaves FXC (the build still publishes).
+      - name: Fetch DXC
+        id: dxc
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dxc
+          gh release download v1.8.2502 -R microsoft/DirectXShaderCompiler -p 'dxc_2*.zip' -D dxc \
+            || gh release download -R microsoft/DirectXShaderCompiler -p 'dxc_2*.zip' -D dxc
+          (cd dxc && 7z x -y dxc_*.zip > /dev/null)
+          test -f dxc/bin/x64/dxcompiler.dll
+          ls dxc/bin/x64
+
+      # The compositor must also build under DXC, as the app will use it.
+      - name: GPU compositor builds under DX12 (DXC)
+        if: steps.dxc.outcome == 'success'
+        run: |
+          export PATH="$PWD/dxc/bin/x64:$PATH"
+          cargo test --locked -p photocraft-gpu --test it compositor_builds
+        shell: bash
+        env:
+          WGPU_BACKEND: dx12
+          WGPU_DX12_COMPILER: dxc
+          PHOTOCRAFT_TEST_FALLBACK_ADAPTER: "1"
+
       - name: Build
         run: cargo build --release --locked -p photocraft
         shell: bash
@@ -74,6 +103,11 @@ jobs:
           cp target/release/photocraft.exe "$out/"
           # portable.txt beside the .exe keeps settings in a PhotoCraftData folder next to it.
           cp packaging/windows/portable.txt "$out/"
+          # DXC beside the .exe (when it was fetched), with its licences.
+          if [ -f dxc/bin/x64/dxcompiler.dll ]; then
+            cp dxc/bin/x64/dxcompiler.dll dxc/bin/x64/dxil.dll "$out/"
+            for l in dxc/LICENSE*; do [ -f "$l" ] && cp "$l" "$out/DXC-$(basename "$l")"; done
+          fi
           # The files at the zip's root: Windows' Extract All already makes a folder named after
           # the zip, so a folder inside it meant extracting twice to reach the .exe.
           (cd "$out" && 7z a -tzip "../$out.zip" ./* > /dev/null)

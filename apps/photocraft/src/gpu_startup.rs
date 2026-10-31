@@ -383,6 +383,13 @@ pub fn configure(setup: &mut egui_wgpu::WgpuSetup, plan: &Plan, os: Os, wanted: 
             let exe = std::env::current_exe().ok();
             let env = std::env::var("WGPU_DX12_COMPILER").ok();
             create.instance_descriptor.backend_options.dx12.shader_compiler = dx12_compiler(env.as_deref(), exe.as_deref().and_then(Path::parent));
+            // FXC builds the compositor's shaders one at a time, slowly (22 s on a dual-core
+            // laptop); DXC, shipped beside the .exe, much faster.
+            match &create.instance_descriptor.backend_options.dx12.shader_compiler {
+                wgpu::Dx12Compiler::DynamicDxc { dxc_path, .. } => log::info!("GPU: DX12 shader compiler: DXC ({dxc_path})"),
+                wgpu::Dx12Compiler::Fxc => log::info!("GPU: DX12 shader compiler: FXC (no dxcompiler.dll beside the .exe; shaders build slowly)"),
+                other => log::info!("GPU: DX12 shader compiler: {other:?}"),
+            }
         }
         let without_vulkan = windows_auto_backends(plan, os, || dx12_vendors(&create.instance_descriptor));
         if let Some(b) = without_vulkan {
