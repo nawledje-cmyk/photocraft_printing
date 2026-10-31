@@ -325,6 +325,10 @@ fn play_owned(app: &mut PhotocraftApp, params: &Value, suspended: Option<Value>)
         } else if actions_cmds::shell_view_command(id) {
             app.sync_views();
             app.run(id, p.clone())
+        } else if matches!(id.as_str(), "file.print" | "file.printOneCopy") {
+            // On a worker (in the app), like File > Print: rendering the page and the driver took
+            // about half a second on the UI thread. It prints a snapshot, so later steps can run.
+            crate::jobs_ui::run(app, id, p.clone())
         } else {
             app.session.execute(id, p.clone()).map_err(|e| e.to_string())
         };
@@ -417,6 +421,7 @@ fn begin_recording(app: &mut PhotocraftApp, append: bool) {
 }
 
 pub(crate) fn report_play(app: &mut PhotocraftApp, v: &Value) {
+    crate::action_notice::played(app, v);
     if let Some(paused) = v.get("paused").filter(|p| p.is_object()) {
         let step = paused.get("step").and_then(Value::as_u64).unwrap_or(0);
         let template = "Step {step} is waiting for its dialog";

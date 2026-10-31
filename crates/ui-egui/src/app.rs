@@ -61,6 +61,7 @@ impl PhotocraftApp {
             remove_trail: None,
             menu_cache: None,
             move_preview: None,
+            action_notice: None,
             move_hover: None,
             move_distance: None,
             object_finder: None,

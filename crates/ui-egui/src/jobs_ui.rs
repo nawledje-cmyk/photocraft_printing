@@ -471,6 +471,14 @@ fn on_event(app: &mut PhotocraftApp, ctx: &egui::Context, e: JobEvent) {
             true
         }
     });
+    if matches!(e.command.as_str(), "file.print" | "file.printOneCopy") {
+        let error = match &e.outcome {
+            JobOutcome::Done(_) => None,
+            JobOutcome::Failed(err) => Some(err.as_str()),
+            JobOutcome::Cancelled => Some("cancelled"),
+        };
+        crate::action_notice::print_ended(app, error);
+    }
     // A Free Transform commit's session ends with its job (then reported like any job).
     crate::transform_tool::on_job_event(app, &e);
     if crate::prefs_ui::on_recovery_event(app, &e) {

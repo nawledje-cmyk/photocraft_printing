@@ -1437,8 +1437,15 @@ fn print(s: &mut Session, p: &Value) -> Result<Value> {
 fn print_one_copy(s: &mut Session, p: &Value) -> Result<Value> {
     let mut q = last_print(s).unwrap_or_else(|| json!({}));
     // A printer remembered from an earlier session may be gone: then the default takes the job,
-    // as the Print dialog falls back (#7410). A list that can't be read decides nothing.
-    if let Ok(listed) = system_printers(s, &q) {
+    // as the Print dialog falls back (#7410). A list that can't be read decides nothing. The
+    // system's printers come from the kept list (refreshed in the background): listing them here
+    // took about half a second on the UI thread for every print an action or shortcut made.
+    let listed = if lists_in_background(s) {
+        last(&LAST_PRINTERS, None).map(printers_answer).ok_or(())
+    } else {
+        system_printers(s, &q).map_err(|_| ())
+    };
+    if let Ok(listed) = listed {
         let names: Vec<&str> = listed["printers"].as_array().into_iter().flatten().filter_map(|p| p["name"].as_str()).collect();
         drop_vanished_printer(&mut q, &names);
     }
