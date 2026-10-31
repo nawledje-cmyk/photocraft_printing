@@ -12,6 +12,21 @@ impl PhotocraftApp {
         #[cfg(not(target_arch = "wasm32"))]
         self.perf.gpu_info.set_available(&rs.available_adapters);
         self.gpu_render_state = Some(rs.clone());
+        // The log says which graphics adapter draws (bug reports attach the log file).
+        let info = rs.adapter.get_info();
+        let driver = [info.driver.as_str(), info.driver_info.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" ");
+        log::info!(
+            "GPU: drawing with {} ({:?}, {}, driver {})",
+            info.name,
+            info.device_type,
+            gpu_canvas::backend_name(info.backend),
+            if driver.is_empty() { "unknown" } else { &driver }
+        );
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let all: Vec<String> = rs.available_adapters.iter().map(|a| a.get_info()).map(|i| format!("{} ({:?}, {})", i.name, i.device_type, gpu_canvas::backend_name(i.backend))).collect();
+            log::info!("GPU: adapters found: {}", if all.is_empty() { "none listed".to_string() } else { all.join("; ") });
+        }
         let gpu = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gpu_canvas::GpuCanvas::with_tile(&rs, Some(tile)))) {
             Ok(gpu) => gpu,
             Err(payload) => {
@@ -20,6 +35,7 @@ impl PhotocraftApp {
                     .cloned()
                     .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
                     .unwrap_or_else(|| "GPU canvas initialization failed".into());
+                log::error!("GPU: the GPU canvas couldn't start, documents are drawn on the CPU: {detail}");
                 self.perf.gpu_info.canvas = "cpu".into();
                 self.perf.gpu_info.fallback = Some(detail.clone());
                 gpu_status::queue_fallback_notice(self, detail);
@@ -28,6 +44,7 @@ impl PhotocraftApp {
             }
         };
         self.perf.gpu_info.canvas = "gpu".into();
+        log::info!("GPU: the canvas draws on the GPU");
         self.window_device = Some((rs.device.clone(), gpu.health().clone()));
         self.gpu = Some(gpu);
         self.prefs_rt.gpu_style = None;

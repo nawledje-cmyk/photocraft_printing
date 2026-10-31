@@ -194,6 +194,11 @@ pub fn supports_f16_canvas(adapter: &wgpu::Adapter) -> bool {
 /// Why a composite went to the CPU while [`GpuCanvas::prewarm_compositor`] is still compiling.
 const COMPOSITOR_BUILDING: &str = "the GPU compositor is still being built";
 
+/// Whether `reason` is only the GPU compositor still being built (the GPU takes over after).
+pub(crate) fn waiting_for_compositor(reason: &crate::render_path::CpuReason) -> bool {
+    matches!(reason, crate::render_path::CpuReason::Unsupported(s) if s == COMPOSITOR_BUILDING)
+}
+
 impl GpuCanvas {
     /// Create pipelines and register resources with the egui renderer.
     pub fn new(rs: &RenderState) -> Self {
@@ -258,7 +263,12 @@ impl GpuCanvas {
                 }
             }
             let _done = Done(flag);
+            let t0 = std::time::Instant::now();
             let built = photocraft_gpu::Compositor::try_new_with_format(&device, format);
+            match &built {
+                Ok(_) => log::info!("GPU: compositor ready (its shaders built in {:.1} s, in the background)", t0.elapsed().as_secs_f64()),
+                Err(e) => log::error!("GPU: couldn't build the compositor, documents are drawn on the CPU: {e}"),
+            }
             *ready.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(built);
         });
         if spawned.is_err() {

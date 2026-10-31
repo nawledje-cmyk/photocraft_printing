@@ -301,7 +301,7 @@ pub(crate) fn styled_frame(app: &PhotocraftApp, zoom: f32, dragging: bool) -> Op
     let (t, pv) = (app.ui.transform.as_ref()?, app.transform_preview.as_ref()?);
     let styled = pv.styled.as_ref().filter(|_| t.warp.is_none())?;
     let st = app.session.active().filter(|st| st.doc.id == pv.doc.id)?;
-    let layer = st.doc.layer(LayerId(t.layer)).filter(|l| l.visible && photocraft_compose::effects::has_effects(l))?;
+    let layer = st.doc.layer(LayerId(t.layer)).filter(|l| l.visible && crate::transform_fx::needs_composite(l))?;
     let frame = crate::transform_fx::Frame {
         doc: &st.doc,
         layer,

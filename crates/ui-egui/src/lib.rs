@@ -324,6 +324,9 @@ pub struct PhotocraftApp {
     /// Canvas caches per (document, display): CPU textures hold monitor values; the GPU
     /// canvas state is shared (`canvas::GPU_OUTPUT`).
     canvases: HashMap<(DocId, u32), canvas::CanvasCache>,
+    /// Documents drawn on the CPU only because the GPU compositor was still being built: redrawn
+    /// on the GPU once it is, so "CPU Rendering" doesn't linger until the next edit.
+    gpu_redo: std::collections::HashSet<DocId>,
     /// Navigator textures belong to open documents, not the lifetime of the egui context.
     navigator_textures: HashMap<DocId, canvas::NavigatorCache>,
     /// `canvas::display_doc`'s live-adjust and Duotone documents per document: (snapshot,

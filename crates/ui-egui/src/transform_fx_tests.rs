@@ -58,7 +58,7 @@ fn styled_texture_tracks_monitor_changes_without_recoloring_effect_inputs() {
 fn composite(app: &PhotocraftApp, zoom: f32) -> Option<(Buffer, Plan)> {
     let (_, frame) = crate::transform_tool::styled_frame(app, zoom, false)?;
     let (plan, work, level) = frame.plan()?;
-    Some((frame.compose(&plan, &work, level)?, plan))
+    Some((frame.compose(&plan, &work, level, None)?, plan))
 }
 
 /// The composite at a document point.

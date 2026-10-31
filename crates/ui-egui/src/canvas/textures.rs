@@ -458,6 +458,18 @@ pub(super) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
     else {
         return false;
     };
+    // Drawn on the CPU while the GPU compositor was still being built: once it is, redraw the
+    // whole document on the GPU.
+    if app.gpu_redo.contains(&id) {
+        if gpu.compositor_building() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        } else {
+            app.gpu_redo.remove(&id);
+            if let Some(c) = app.canvases.get_mut(&(id, GPU_OUTPUT)) {
+                c.revision = u64::MAX;
+            }
+        }
+    }
     let (doc, raw_key) = display_doc(app, idx);
     let (display, _) = canvas_display(app, &doc, None);
     // Repeated pattern tiles sample the same texture, including pixels outside the unwrapped
@@ -582,6 +594,10 @@ pub(super) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
         Some(reason) => crate::render_path::note(app, id.0, crate::render_path::Path::Cpu(reason.clone())),
         None if r.kind.starts_with("gpu") => crate::render_path::note(app, id.0, crate::render_path::Path::Gpu { full: r.kind == "gpu-full" }),
         None => {}
+    }
+    if r.fallback.as_ref().is_some_and(crate::gpu_canvas::waiting_for_compositor) {
+        app.gpu_redo.insert(id);
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
     }
     if r.kind != crate::gpu_canvas::REFRESH_DEFERRED {
         app.perf.record_refresh(&r);

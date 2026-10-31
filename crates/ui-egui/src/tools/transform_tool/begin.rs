@@ -66,16 +66,26 @@ pub fn begin(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String>
     above.hide_in(&mut pd.layers);
     // A style is drawn again from the pixels as the box moves them, so they are read without it.
     // Not for the selected part of a layer: its style belongs to that part and the rest together.
-    let styled = lifted.is_none() && photocraft_compose::effects::has_effects(layer);
+    // A blend mode (Multiply…) is shown by compositing onto the document under the box.
+    let has_style = photocraft_compose::effects::has_effects(layer);
+    let styled = crate::transform_fx::needs_composite(layer) && (lifted.is_none() || !has_style);
     let (image, uv) = preview_image(&doc, id, lifted.as_ref(), b, max_side, styled);
     let texture = crate::transform_tex::PreviewTextures::new(ctx, format!("transform-{session}"), image, uv);
+    let pd = Arc::new(pd);
     app.transform_preview = Some(TransformPreview {
         session,
-        doc: Arc::new(pd),
+        doc: pd.clone(),
         texture,
         opacity: layer.opacity * layer.fill_opacity,
         above: Some(above),
-        styled: styled.then(|| crate::transform_fx::StyledPreview::new(format!("transform-{session}-styled"))),
+        styled: styled.then(|| {
+            let name = format!("transform-{session}-styled");
+            if crate::transform_fx::needs_backdrop(layer) {
+                crate::transform_fx::StyledPreview::with_backdrop(name, ctx, pd)
+            } else {
+                crate::transform_fx::StyledPreview::new(name)
+            }
+        }),
         follow: Some(Follow { revision, hidden: if lifted.is_none() { vec![id] } else { Vec::new() } }),
         committing: None,
         gesture: None,
