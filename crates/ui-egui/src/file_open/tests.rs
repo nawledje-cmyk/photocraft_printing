@@ -1118,3 +1118,44 @@ fn opening_an_open_file_again_shows_its_tab() {
         let _ = std::fs::remove_dir_all(&d);
     }
 }
+
+/// With background jobs (the desktop app), a file dropped on the canvas is read and decoded on
+/// another thread: the frame it's dropped in returns at once with nothing placed yet, and the
+/// layer is added, in Free Transform, as one Place Embedded step when it lands.
+#[test]
+fn a_dropped_file_is_decoded_off_the_ui_thread() {
+    let dir = std::env::temp_dir().join(format!("photocraft-drop-bg-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let abs = dir.join("photo.png");
+    std::fs::write(&abs, png_bytes(300, 200)).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app_with_canvas();
+    app.background_jobs = true;
+    let (layers, steps) = (layer_count(&app), history_steps(&app));
+    app.open_dropped(&ctx, vec![dropped(abs, Err("egui's reader must not be used".into()))], Some(egui::pos2(400.0, 300.0)));
+    app.place_next_dropped(&ctx);
+    assert!(app.placing.is_some(), "decoding in the background");
+    let start = std::time::Instant::now();
+    while app.placing.is_some() {
+        assert!(start.elapsed() < std::time::Duration::from_secs(30), "the place never landed");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        app.place_next_dropped(&ctx);
+    }
+    assert_eq!(layer_count(&app), layers + 1);
+    assert_eq!(history_steps(&app), steps + 1);
+    assert_eq!(app.session.active().unwrap().history.undo_label(), Some("Place Embedded"));
+    let t = app.ui.transform.as_ref().expect("the placed layer is in Free Transform");
+    assert_eq!(t.made, Some(crate::state::MadeLayer::Place));
+    let st = app.session.active().unwrap();
+    assert!(matches!(st.doc.layer(st.active_layer.unwrap()).unwrap().content, photocraft_doc::LayerContent::Smart(_)));
+    // An undecodable file is reported, not placed.
+    crate::transform_tool::commit(&mut app);
+    app.open_dropped(&ctx, vec![dropped("bad.png", Ok(b"bad".to_vec()))], Some(egui::pos2(400.0, 300.0)));
+    app.place_next_dropped(&ctx);
+    while app.placing.is_some() {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        app.place_next_dropped(&ctx);
+    }
+    assert_eq!(layer_count(&app), layers + 1);
+    assert!(app.ui.notices.iter().any(|n| n.error));
+}

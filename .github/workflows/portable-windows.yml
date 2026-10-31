@@ -74,13 +74,17 @@ jobs:
           cp target/release/photocraft.exe "$out/"
           # portable.txt beside the .exe keeps settings in a PhotoCraftData folder next to it.
           cp packaging/windows/portable.txt "$out/"
-          7z a -tzip "$out.zip" "$out" > /dev/null
+          # The files at the zip's root: Windows' Extract All already makes a folder named after
+          # the zip, so a folder inside it meant extracting twice to reach the .exe.
+          (cd "$out" && 7z a -tzip "../$out.zip" ./* > /dev/null)
           cp target/release/photocraft.exe "$out.exe"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: PhotoCraft-Portable-win64
-          path: PhotoCraft-Portable-win64.zip
+          # The files themselves: GitHub zips an artifact for download, so uploading the zip
+          # gave a zip inside a zip.
+          path: PhotoCraft-Portable-win64/
 
       - name: Publish download
         shell: bash

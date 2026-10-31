@@ -39,14 +39,15 @@ use info::file_info;
 pub use info::{CAMERA_FIELDS, camera_data, read_file_info, write_file_info};
 #[cfg(test)]
 use info::{exposure_text, find_element};
-pub use open::{PLACE_EMBEDDED, open_bytes_as, place_bytes, raw_defaults};
+pub use paths::read_file;
+pub use open::{PLACE_EMBEDDED, PlaceSetup, PreparedPlace, apply_place, open_bytes_as, place_bytes, place_setup, prepare_place, raw_defaults};
 use open::{close_all, close_others, open_as, place, revert};
 pub(crate) use open::{import, tag_exr_colorspace};
 use paths::is_file;
 #[cfg(test)]
 use paths::openable_name;
 pub use paths::{extension, holds, holds_at, is_template, layered_extension, list_images, losses_at, same_file, saves_in_place, template_name, untitled_name};
-pub(crate) use paths::{file_name, forward_slashes, is_windows_device_name, join, portable_device_name, read_file, sanitize, stem, write_file};
+pub(crate) use paths::{file_name, forward_slashes, is_windows_device_name, join, portable_device_name, sanitize, stem, write_file};
 use processing::{conditional_mode_change, fit_image, flatten_all_effects, flatten_all_masks, image_processor, load_files_into_stack};
 use save::save_a_copy;
 pub(crate) use save::{SaveOpts, encode, save_doc};

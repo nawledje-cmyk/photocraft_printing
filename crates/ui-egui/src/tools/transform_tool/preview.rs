@@ -15,11 +15,25 @@ pub(super) fn preview_image(
     let layer = doc.layer(id);
     // Linked masks move with the pixels, so the moving texels carry them (#205).
     let mask = layer.and_then(|l| preview_mask(l, b));
-    // Groups and type/fill layers preview from a flattened render of just that layer.
+    // Groups and type/fill layers preview from a flattened render of just that layer. A raster
+    // layer, and a smart object drawn as its cached pixels (no smart filters, warp or style: a
+    // file just placed), give their pixels as they are, without compositing them.
+    let direct = layer.is_some_and(|l| match &l.content {
+        LayerContent::Raster(_) => true,
+        LayerContent::Smart(so) => {
+            so.cache.is_some()
+                && so.smart_filters.is_empty()
+                && so.warp.is_none()
+                && so.filter_mask.is_none()
+                && so.stack_mode.is_none()
+                && !photocraft_compose::effects::has_effects(l)
+        }
+        _ => false,
+    });
     let rendered;
     let surf: Option<&photocraft_raster::Surface> = match (lifted, layer.and_then(|l| l.surface())) {
         (Some(s), _) => Some(s),
-        (None, Some(s)) if layer.is_some_and(|l| matches!(l.content, LayerContent::Raster(_))) => Some(s),
+        (None, Some(s)) if direct => Some(s),
         _ => {
             let mut solo = doc.clone();
             if layer.is_some() {
@@ -46,7 +60,7 @@ pub(super) fn preview_image(
     };
     let Some(surf) = surf else { return (egui::ColorImage::new([1, 1], vec![Color32::TRANSPARENT]), [1.0, 1.0]) };
     // A flattened render already has the masks applied.
-    let raw = lifted.is_some() || layer.is_some_and(|l| matches!(l.content, LayerContent::Raster(_)));
+    let raw = lifted.is_some() || direct;
     crate::transform_tex::read_surface(surf, mask.as_ref().filter(|_| raw), b, max_side)
 }
 

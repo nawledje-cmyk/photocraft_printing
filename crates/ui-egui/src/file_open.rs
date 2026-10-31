@@ -33,6 +33,19 @@ pub enum DropTarget {
     Elsewhere,
 }
 
+/// Where a background place reads its file from.
+enum PlaceSource {
+    Path(String),
+    Bytes(Vec<u8>),
+}
+
+/// A dropped file decoded in the background, for the document it was dropped on.
+pub(crate) struct Placing {
+    name: String,
+    doc: photocraft_doc::DocId,
+    rx: std::sync::mpsc::Receiver<Result<photocraft_engine::file_cmds::PreparedPlace, String>>,
+}
+
 /// A file dropped on the canvas, waiting its turn to be placed.
 pub(crate) enum DropPlace {
     /// Dropped onto the window (desktop): read from its path, or through egui.
@@ -302,9 +315,41 @@ impl PhotocraftApp {
 
     /// Place the next file dropped on the canvas and start Free Transform on it, once no other
     /// transform is in progress (so several files are placed and transformed one after another).
+    /// With background jobs (the desktop app) the file is read and decoded on another thread, so
+    /// the window keeps drawing; the layer is added when it lands.
     pub(crate) fn place_next_dropped(&mut self, ctx: &egui::Context) {
+        if !self.finish_placing(ctx) {
+            return;
+        }
         while self.ui.transform.is_none() {
             let Some(next) = self.drop_places.pop_front() else { return };
+            // A recording takes the command (replayable by path), as before.
+            if self.background_jobs && self.session.actions.recording.is_none() {
+                let (name, source) = match next {
+                    DropPlace::File(f) if f.path().is_absolute() => match path_text(f.path(), false) {
+                        Ok(path) => (dropped_name(&f), PlaceSource::Path(path)),
+                        Err(e) => {
+                            self.failed(crate::i18n::fmt(tl!("Couldn't place {name}: {error}"), &[("name", &dropped_name(&f)), ("error", &e)]));
+                            continue;
+                        }
+                    },
+                    DropPlace::File(f) => {
+                        let name = dropped_name(&f);
+                        match crate::read_dropped(&*f) {
+                            Ok(bytes) => (name, PlaceSource::Bytes(bytes)),
+                            Err(e) => {
+                                self.failed(crate::i18n::fmt(tl!("Couldn't place {name}: {error}"), &[("name", &name), ("error", &e)]));
+                                continue;
+                            }
+                        }
+                    }
+                    DropPlace::Bytes(name, bytes) => (name, PlaceSource::Bytes(bytes)),
+                };
+                if self.start_placing(ctx, name, source) {
+                    return;
+                }
+                continue;
+            }
             let (name, placed) = match next {
                 DropPlace::File(f) if f.path().is_absolute() => {
                     (dropped_name(&f), path_text(f.path(), false).and_then(|path| self.run("file.placeEmbedded", serde_json::json!({"path": path}))))
@@ -328,6 +373,79 @@ impl PhotocraftApp {
                 Err(e) => self.failed(crate::i18n::fmt(tl!("Couldn't place {name}: {error}"), &[("name", &name), ("error", &e)])),
             }
         }
+    }
+
+    /// Read and decode a dropped file on another thread (the slow part of placing it); the layer is
+    /// added by [`Self::finish_placing`] when it lands. False when it couldn't start (then it was
+    /// reported).
+    fn start_placing(&mut self, ctx: &egui::Context, name: String, source: PlaceSource) -> bool {
+        let Some(doc) = self.session.active().map(|st| st.doc.id) else { return false };
+        let setup = match photocraft_engine::file_cmds::place_setup(&self.session, &serde_json::json!({})) {
+            Ok(s) => s,
+            Err(e) => {
+                self.failed(crate::i18n::fmt(tl!("Couldn't place {name}: {error}"), &[("name", &name), ("error", &e.to_string())]));
+                return false;
+            }
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (thread_name, repaint) = (name.clone(), ctx.clone());
+        let work = move || {
+            let result = (|| {
+                let bytes = match source {
+                    PlaceSource::Path(path) => photocraft_engine::file_cmds::read_file(&path).map_err(|e| e.to_string())?,
+                    PlaceSource::Bytes(bytes) => bytes,
+                };
+                photocraft_engine::file_cmds::prepare_place(&setup, &thread_name, bytes, None, &serde_json::json!({})).map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(result);
+            repaint.request_repaint();
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::thread::Builder::new().name("place-dropped".into()).spawn(work).is_err() {
+            self.failed(crate::i18n::fmt(tl!("Couldn't place {name}: {error}"), &[("name", &name), ("error", "no thread to read it on")]));
+            return false;
+        }
+        #[cfg(target_arch = "wasm32")]
+        work();
+        self.ui.status = crate::i18n::fmt(tl!("Placing {name}…"), &[("name", &name)]);
+        self.ui.status_error = false;
+        self.placing = Some(Placing { name, doc, rx });
+        ctx.request_repaint();
+        true
+    }
+
+    /// Add the dropped file decoded in the background ([`Self::start_placing`]) once it lands, and
+    /// start Free Transform on it. False while it's still decoding.
+    fn finish_placing(&mut self, ctx: &egui::Context) -> bool {
+        let Some(p) = self.placing.as_ref() else { return true };
+        let result = match p.rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                return false;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("the file couldn't be read".into()),
+        };
+        let Some(Placing { name, doc, .. }) = self.placing.take() else { return true };
+        // Placed into the document it was dropped on, when that's still the active one.
+        let placed = result.and_then(|prepared| {
+            if self.session.active().map(|st| st.doc.id) != Some(doc) {
+                return Err("the document it was dropped on isn't active any more".into());
+            }
+            let r = photocraft_engine::file_cmds::apply_place(&mut self.session, prepared).map_err(|e| e.to_string());
+            self.sync_views();
+            r
+        });
+        match placed {
+            Ok(_) => {
+                self.ui.status.clear();
+                if let Err(e) = crate::transform_tool::begin_placed(self, ctx) {
+                    self.ui.status = e;
+                }
+            }
+            Err(e) => self.failed(crate::i18n::fmt(tl!("Couldn't place {name}: {error}"), &[("name", &name), ("error", &e)])),
+        }
+        true
     }
 
     /// Place a file's bytes as a smart object layer (File › Place; `linked`: Place Linked, to that
