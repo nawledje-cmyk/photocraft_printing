@@ -1334,3 +1334,54 @@ fn nested_folders_show_as_a_tree() {
     assert!(h.state().ui.actions.folder_prompt.is_none());
     assert!(photocraft_engine::actions_cmds::folders::all(&h.state().session.actions).contains(&"Retouch/Skin/Eyes".to_string()));
 }
+
+/// Dragging an action onto a folder row files it there; clicking a folder selects it alone (the
+/// action's highlight goes); Delete with a folder selected asks, then deletes the folder.
+#[test]
+fn actions_drop_into_folders_and_a_selected_folder_deletes() {
+    use egui_kittest::{Harness, kittest::Queryable};
+    let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+    app.session.actions.list.push(Action::new("Glow", vec![]));
+    app.session.actions.list.push(Action::new("Keep", vec![]));
+    app.run("actions.newFolder", json!({"name": "Retouch"})).unwrap();
+    app.run("actions.newFolder", json!({"name": "Skin", "parent": "Retouch"})).unwrap();
+    let mut h = Harness::builder().with_size(vec2(400.0, 420.0)).build_ui_state(|ui, app| panel(app, ui), app);
+    h.run_steps(3);
+    fn drag(h: &mut Harness<'_, PhotocraftApp>, from: egui::Pos2, to: egui::Pos2) {
+        h.event(egui::Event::PointerMoved(from));
+        h.run_steps(1);
+        h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        h.run_steps(1);
+        h.event(egui::Event::PointerMoved(from + vec2(10.0, 0.0)));
+        h.run_steps(2);
+        h.event(egui::Event::PointerMoved(to));
+        h.run_steps(2);
+        h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.run_steps(3);
+    }
+    // Drop "Glow" on the "Skin" subfolder row.
+    let from = h.get_by_label("Glow").rect().center();
+    let to = h.get_by_label("Skin").rect().center();
+    drag(&mut h, from, to);
+    let glow = h.state().session.actions.list.iter().find(|a| a.name == "Glow").unwrap();
+    assert_eq!(glow.set.as_deref(), Some("Retouch/Skin"), "dropped into the subfolder");
+
+    // Select an action, then a folder: only the folder stays selected.
+    h.get_by_label("Keep").click();
+    h.run_steps(2);
+    assert!(h.state().ui.actions.selected.is_some());
+    h.get_by_label("Retouch").click();
+    h.run_steps(2);
+    assert_eq!(h.state().ui.actions.selected, None, "the action is no longer selected");
+    assert_eq!(h.state().ui.actions.selected_folder.as_deref(), Some("Retouch"));
+
+    // Delete with the folder selected asks first, then removes it with its subfolder and action.
+    delete_selection(h.state_mut());
+    h.run_steps(2);
+    assert!(h.state().ui.actions.folder_prompt.is_some(), "Delete asks before deleting a folder");
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Delete Folder").click();
+    h.run_steps(3);
+    let st = h.state();
+    assert!(photocraft_engine::actions_cmds::folders::all(&st.session.actions).is_empty(), "folder and subfolder deleted");
+    assert_eq!(st.session.actions.list.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Keep"]);
+}
