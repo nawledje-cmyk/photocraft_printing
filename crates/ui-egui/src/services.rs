@@ -323,6 +323,10 @@ pub type RightButtonDownFn = Box<dyn Fn() -> bool + Send + Sync>;
 /// I/O dependencies.
 #[derive(Default)]
 pub struct Services {
+    /// The app window's native handle (a Windows HWND), the owner of the system's modal dialogs
+    /// (the printer driver's Print Settings): without one, clicking the app hid the dialog behind
+    /// it while the app waited for the dialog, so the app froze.
+    pub native_window: Option<isize>,
     /// User-initiated desktop/browser pixel sampling.
     pub screen_pick: Option<screen_picker::Service>,
     /// Decode a file's bytes into a document (PSD, PNG, JPEG, …).

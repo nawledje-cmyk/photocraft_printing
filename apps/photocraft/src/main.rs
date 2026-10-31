@@ -632,6 +632,15 @@ fn main() -> eframe::Result {
             // The custom title bar's undecorated window must stay borderless, or its caption and
             // border offset the content and the pointer on some Windows systems (#2246).
             app.services.window_frame = window_frame::service(cc, custom_titlebar);
+            // The window's handle owns the system's modal dialogs (the printer's Print Settings).
+            #[cfg(windows)]
+            {
+                use eframe::wgpu::rwh::{HasWindowHandle, RawWindowHandle};
+                app.services.native_window = match cc.window_handle().map(|h| h.as_raw()) {
+                    Ok(RawWindowHandle::Win32(h)) => Some(h.hwnd.get()),
+                    _ => None,
+                };
+            }
             // Linux: the desktop's caption buttons (GNOME's, KDE's) on the sides its layout puts them.
             if custom_titlebar {
                 app.services.caption_style = caption_style::service();

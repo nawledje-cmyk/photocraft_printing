@@ -35,36 +35,25 @@ pub struct ActionsUi {
     /// The action whose shortcut is being captured from the keyboard.
     #[serde(skip)]
     shortcut_capture: Option<ShortcutCapture>,
-    /// The folder last clicked: New Subfolder goes inside it.
+    /// The folder last clicked alone: New Folder goes inside it.
     #[serde(default)]
     pub selected_folder: Option<String>,
-    /// The New Folder / Rename Folder / Delete Folder window that is open.
+    /// Several selected items (⌘/Ctrl- and ⇧-click); empty when one is (`selected`,
+    /// `selected_folder`).
     #[serde(skip)]
-    folder_prompt: Option<FolderPrompt>,
-}
-
-/// What the folder window does on OK.
-#[derive(Clone, Debug, PartialEq)]
-enum FolderPromptKind {
-    New { parent: Option<String> },
-    Rename { folder: String },
-    Delete { folder: String, actions: usize },
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct FolderPrompt {
-    kind: FolderPromptKind,
-    text: String,
-    error: Option<String>,
-    focused: bool,
-}
-
-/// What a folder row's context menu asked for.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum FolderAction {
-    NewSubfolder,
-    Rename,
-    Delete,
+    pub(crate) picked: Vec<organize::Pick>,
+    /// The item ⇧-click ranges start from.
+    #[serde(skip)]
+    anchor: Option<organize::Pick>,
+    /// What Copy kept, for Paste.
+    #[serde(skip)]
+    clipboard: Vec<organize::Copied>,
+    /// The folder being named in place.
+    #[serde(skip)]
+    folder_rename: Option<organize::FolderRename>,
+    /// Delete's confirmation, while it's open.
+    #[serde(skip)]
+    delete_prompt: Option<organize::DeletePrompt>,
 }
 
 /// Custom Shortcut…: any key with any modifiers, not only Photoshop's F1–F15 (#7646 kept those
@@ -795,7 +784,7 @@ pub fn panel_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let recording = app.session.actions.recording.is_some();
     let any = !app.session.actions.list.is_empty();
     let selected = app.ui.actions.selected.is_some_and(|i| i < app.session.actions.list.len());
-    let can_delete = (selected && (!recording || app.ui.actions.selected_step.is_some())) || (!recording && selected_folder(app).is_some());
+    let can_delete = (selected && app.ui.actions.selected_step.is_some()) || (!recording && !organize::selection(app).is_empty());
     if ui.add_enabled(!recording, egui::Button::new(tl!("New Action…"))).clicked() {
         act = Some("new");
     }
@@ -815,12 +804,8 @@ pub fn panel_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     if ui.add_enabled(selected && !recording, egui::Button::new(tl!("Set Shortcut…"))).clicked() {
         act = Some("shortcut");
     }
-    if ui.button(tl!("New Folder…")).clicked() {
+    if ui.button(tl!("New Folder")).clicked() {
         act = Some("folder");
-    }
-    let folder_selected = app.ui.actions.selected_folder.as_ref().is_some_and(|f| photocraft_engine::actions_cmds::folders::all(&app.session.actions).contains(f));
-    if ui.add_enabled(folder_selected, egui::Button::new(tl!("New Subfolder…"))).clicked() {
-        act = Some("subfolder");
     }
     ui.separator();
     if ui.add_enabled(selected, egui::Button::new(tl!("Insert Stop…"))).clicked() {
@@ -857,12 +842,7 @@ pub fn panel_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         "load" => load_dialog(app),
         "stop" => insert_stop_dialog(app),
         "folder" => {
-            open_folder_prompt(app, FolderPromptKind::New { parent: None });
-            Ok(Value::Null)
-        }
-        "subfolder" => {
-            let parent = app.ui.actions.selected_folder.clone();
-            open_folder_prompt(app, FolderPromptKind::New { parent });
+            organize::new_folder(app);
             Ok(Value::Null)
         }
         "shortcut" => {
@@ -932,28 +912,21 @@ fn move_row(app: &mut PhotocraftApp, source: DragRow, to: usize) {
     }
 }
 
-/// The selected folder, when it still exists and no action or step is selected.
-fn selected_folder(app: &PhotocraftApp) -> Option<String> {
-    if app.ui.actions.selected.is_some() {
-        return None;
-    }
-    app.ui.actions.selected_folder.clone().filter(|f| photocraft_engine::actions_cmds::folders::all(&app.session.actions).contains(f))
-}
-
-/// Delete asks before deleting the selected folder with everything in it.
-fn confirm_delete_folder(app: &mut PhotocraftApp, folder: String) {
-    use photocraft_engine::actions_cmds::folders;
-    let actions = app.session.actions.list.iter().filter(|a| a.set.as_deref().is_some_and(|s| folders::within(s, &folder))).count();
-    open_folder_prompt(app, FolderPromptKind::Delete { folder, actions });
-}
-
+/// Delete: the selected step, else the selected actions and folders (asking first for folders or
+/// several items).
 fn delete_selection(app: &mut PhotocraftApp) {
-    if let Some(folder) = selected_folder(app) {
-        if app.session.actions.recording.is_none() {
-            confirm_delete_folder(app, folder);
+    if app.ui.actions.selected_step.is_none() {
+        let picks = organize::selection(app);
+        if !picks.is_empty() {
+            organize::request_delete(app, picks);
         }
         return;
     }
+    delete_selected_action(app);
+}
+
+/// Delete the selected action, or its selected step.
+fn delete_selected_action(app: &mut PhotocraftApp) {
     let Some(action) = app.ui.actions.selected else { return };
     let step = app.ui.actions.selected_step;
     let mut params = json!({"action": action});
@@ -1049,18 +1022,36 @@ fn tree_order(rows: &[Row], folders: &[String], collapsed: &[String]) -> Vec<Ent
 }
 
 struct SetHeaderResult {
-    toggled: bool,
-    save: bool,
-    action: Option<FolderAction>,
-    /// An action dragged onto the folder row and dropped there (its index): it goes inside.
-    dropped: Option<usize>,
+    response: egui::Response,
+    /// Where the name is drawn (the name field goes there while it's being named).
+    name_rect: Rect,
+    /// What was dropped on the row: it goes inside the folder.
+    dropped: Option<Dropped>,
 }
 
-/// A folder row, `depth` folders deep: click to select it and open or close it; right-click for
-/// New Subfolder, Rename, Delete and Save Set.
-fn draw_set_header(ui: &mut egui::Ui, path: &str, depth: usize, count: u64, collapsed: bool, selected: bool, tokens: &Tokens) -> SetHeaderResult {
+/// Something dropped on a folder row: an action row (its index) or dragged items.
+enum Dropped {
+    Row(usize),
+    Picks(Vec<organize::Pick>),
+}
+
+/// A folder row, `depth` folders deep. Dragged, it carries `carry` (the selection, when the row is
+/// in it); actions and folders dropped on it go inside.
+#[allow(clippy::too_many_arguments)]
+fn draw_set_header(
+    ui: &mut egui::Ui,
+    path: &str,
+    depth: usize,
+    count: u64,
+    collapsed: bool,
+    selected: bool,
+    naming: bool,
+    carry: Vec<organize::Pick>,
+    tokens: &Tokens,
+) -> SetHeaderResult {
     let set = photocraft_engine::actions_cmds::folders::leaf(path);
-    let (full, response) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+    let (full, response) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click_and_drag());
+    response.dnd_set_drag_payload(organize::DragPicks(carry));
     response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, !collapsed, set));
     if selected {
         ui.painter().rect_filled(full, 0.0, tokens.row_selected);
@@ -1082,145 +1073,34 @@ fn draw_set_header(ui: &mut egui::Ui, path: &str, depth: usize, count: u64, coll
         12.0,
         tokens.icon,
     );
-    ui.painter().text(pos2(rect.left() + 44.0, rect.center().y), Align2::LEFT_CENTER, set, egui::FontId::proportional(12.0), tokens.text);
     let summary = crate::i18n::trn(crate::i18n::current(), count, "{n} action", "{n} actions");
-    ui.painter().text(pos2(rect.right() - 8.0, rect.center().y), Align2::RIGHT_CENTER, summary, egui::FontId::proportional(11.0), tokens.text_faint);
-    let toggled = response.clicked();
-    // An action (not a step) dragged over the row drops into the folder.
-    let carrying = response.dnd_hover_payload::<DragRow>().is_some_and(|p| p.step.is_none());
-    if carrying {
+    let summary_galley = ui.painter().layout_no_wrap(summary, egui::FontId::proportional(11.0), tokens.text_faint);
+    let name_rect = Rect::from_min_max(pos2(rect.left() + 40.0, full.top() + 2.0), pos2((full.right() - summary_galley.size().x - 16.0).max(rect.left() + 80.0), full.bottom() - 2.0));
+    if !naming {
+        ui.painter().text(pos2(rect.left() + 44.0, rect.center().y), Align2::LEFT_CENTER, set, egui::FontId::proportional(12.0), tokens.text);
+    }
+    ui.painter().galley(pos2(full.right() - 8.0 - summary_galley.size().x, rect.center().y - summary_galley.size().y / 2.0), summary_galley, tokens.text_faint);
+    // An action (not a step) or dragged folders over the row drop into the folder.
+    let row = response.dnd_hover_payload::<DragRow>().is_some_and(|p| p.step.is_none());
+    let picks = response.dnd_hover_payload::<organize::DragPicks>().is_some_and(|p| !p.0.iter().any(|q| matches!(q, organize::Pick::Folder(f) if photocraft_engine::actions_cmds::folders::within(path, f))));
+    if row || picks {
         ui.painter().rect_stroke(full.shrink(1.0), 3.0, Stroke::new(2.0, tokens.accent), egui::StrokeKind::Inside);
     }
-    let dropped = response.dnd_release_payload::<DragRow>().filter(|p| p.step.is_none()).map(|p| p.action);
-    let mut save = false;
-    let mut action = None;
-    response.context_menu(|ui| {
-        for (a, label) in [(FolderAction::NewSubfolder, tl!("New Subfolder…")), (FolderAction::Rename, tl!("Rename Folder…")), (FolderAction::Delete, tl!("Delete Folder…"))] {
-            if ui.button(label).clicked() {
-                action = Some(a);
-                ui.close();
-            }
-        }
-        ui.separator();
-        if ui.button(tl!("Save Set…")).clicked() {
-            save = true;
-            ui.close();
-        }
-    });
-    SetHeaderResult { toggled, save, action, dropped }
-}
-
-/// Open the folder window: a name for a new folder (inside `parent`), a new name, or the
-/// confirmation to delete a folder and everything in it.
-fn open_folder_prompt(app: &mut PhotocraftApp, kind: FolderPromptKind) {
-    let text = match &kind {
-        FolderPromptKind::Rename { folder } => photocraft_engine::actions_cmds::folders::leaf(folder).to_string(),
-        _ => String::new(),
+    // Take only the payload type being carried: taking another type drops the payload.
+    let dropped = if egui::DragAndDrop::has_payload_of_type::<DragRow>(ui.ctx()) {
+        response.dnd_release_payload::<DragRow>().filter(|p| p.step.is_none()).map(|p| Dropped::Row(p.action))
+    } else if egui::DragAndDrop::has_payload_of_type::<organize::DragPicks>(ui.ctx()) {
+        response.dnd_release_payload::<organize::DragPicks>().map(|p| Dropped::Picks(p.0.clone()))
+    } else {
+        None
     };
-    app.ui.actions.folder_prompt = Some(FolderPrompt { kind, text, error: None, focused: false });
-}
-
-/// The New Folder / New Subfolder / Rename Folder / Delete Folder window.
-fn folder_prompt_window(app: &mut PhotocraftApp, ctx: &egui::Context) {
-    use photocraft_engine::actions_cmds::folders;
-    let Some(mut prompt) = app.ui.actions.folder_prompt.take() else { return };
-    let mut ok = false;
-    let mut cancel = ctx.input(|i| i.key_pressed(egui::Key::Escape));
-    let title = match &prompt.kind {
-        FolderPromptKind::New { parent: None } => tl!("New Folder"),
-        FolderPromptKind::New { parent: Some(_) } => tl!("New Subfolder"),
-        FolderPromptKind::Rename { .. } => tl!("Rename Folder"),
-        FolderPromptKind::Delete { .. } => tl!("Delete Folder"),
-    };
-    let t = Tokens::get(ctx);
-    egui::Modal::new(egui::Id::unique("action-folder-prompt")).show(ctx, |ui| {
-        ui.set_width(340.0);
-        ui.heading(title);
-        ui.separator();
-        match &prompt.kind {
-            FolderPromptKind::Delete { folder, actions } => {
-                let template = "Delete the folder \"{folder}\", its subfolders and the {count} actions in them?";
-                ui.label(crate::i18n::fmt(tl!(template), &[("folder", folder), ("count", &actions.to_string())]));
-            }
-            kind => {
-                if let FolderPromptKind::New { parent: Some(parent) } = kind {
-                    let template = "Inside \"{folder}\"";
-                    ui.label(egui::RichText::new(crate::i18n::fmt(tl!(template), &[("folder", parent)])).color(t.text_dim));
-                }
-                ui.label(tl!("Name:"));
-                let field = ui.add(egui::TextEdit::singleline(&mut prompt.text).desired_width(f32::INFINITY));
-                if !prompt.focused {
-                    field.request_focus();
-                    prompt.focused = true;
-                }
-                if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    ok = true;
-                }
-            }
-        }
-        if let Some(e) = &prompt.error {
-            ui.colored_label(t.danger, e);
-        }
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            let label = if matches!(prompt.kind, FolderPromptKind::Delete { .. }) { tl!("Delete Folder") } else { tl!("OK") };
-            if ui.button(label).clicked() {
-                ok = true;
-            }
-            if ui.button(tl!("Cancel")).clicked() {
-                cancel = true;
-            }
-        });
-    });
-    if cancel {
-        return;
-    }
-    if !ok {
-        app.ui.actions.folder_prompt = Some(prompt);
-        return;
-    }
-    let name = prompt.text.trim().to_string();
-    let result = match &prompt.kind {
-        FolderPromptKind::New { parent } => app.run("actions.newFolder", json!({"name": name, "parent": parent})),
-        FolderPromptKind::Rename { folder } => app.run("actions.renameFolder", json!({"folder": folder, "name": name})),
-        FolderPromptKind::Delete { folder, .. } => app.run("actions.deleteFolder", json!({"folder": folder})),
-    };
-    match result {
-        Ok(r) => {
-            let ui_state = &mut app.ui.actions;
-            match &prompt.kind {
-                FolderPromptKind::New { parent } => {
-                    // The new folder shows: its parent opens, and it's selected.
-                    if let Some(parent) = parent {
-                        ui_state.collapsed_sets.retain(|c| !folders::within(parent, c));
-                    }
-                    ui_state.selected_folder = r["folder"].as_str().map(str::to_string);
-                }
-                FolderPromptKind::Rename { folder } => {
-                    let new = r["folder"].as_str().unwrap_or_default().to_string();
-                    let moved = |p: &str| if folders::within(p, folder) { format!("{new}{}", &p[folder.len()..]) } else { p.to_string() };
-                    ui_state.collapsed_sets = ui_state.collapsed_sets.iter().map(|c| moved(c)).collect();
-                    ui_state.selected_folder = ui_state.selected_folder.as_deref().map(moved);
-                }
-                FolderPromptKind::Delete { folder, .. } => {
-                    ui_state.collapsed_sets.retain(|c| !folders::within(c, folder));
-                    ui_state.selected_folder = None;
-                    ui_state.selected = None;
-                    ui_state.selected_step = None;
-                    ui_state.expanded.clear();
-                }
-            }
-        }
-        Err(e) => {
-            prompt.error = Some(e);
-            prompt.focused = false;
-            app.ui.actions.folder_prompt = Some(prompt);
-        }
-    }
+    SetHeaderResult { response, name_rect, dropped }
 }
 
 fn action_context_menu(app: &mut PhotocraftApp, response: &egui::Response, index: usize, name: &str, swatch: &str) {
     egui::Popup::context_menu(response).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+        organize::item_menu(app, ui, &organize::Pick::Action(name.to_string()));
+        ui.separator();
         ui.label(tl!("Keyboard Shortcuts"));
         let current = app.session.prefs().shortcuts.get(&shortcut_id(name)).cloned().unwrap_or_default();
         // Photoshop's Action Options: a function key, with Shift and Command (#7646).
@@ -1327,8 +1207,7 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let mut dialog_toggled = None;
     let mut set_toggled: Option<String> = None;
     let mut save_set: Option<String> = None;
-    let mut folder_action: Option<(FolderAction, String)> = None;
-    let mut dropped_in: Option<(usize, String)> = None;
+    let mut dropped_in: Option<(Vec<organize::Pick>, Option<String>)> = None;
     let max_h = (ui.available_height() - 38.0).max(0.0);
     let mut play_idx = None;
     let mut moved = None;
@@ -1347,23 +1226,56 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         }
         scroll_actions_during_drag(ui);
         let folders = photocraft_engine::actions_cmds::folders::all(&app.session.actions);
-        for entry in tree_order(&rows, &folders, &app.ui.actions.collapsed_sets) {
+        let tree = tree_order(&rows, &folders, &app.ui.actions.collapsed_sets);
+        // The rows as shown, for ⇧-click ranges; and what's selected now.
+        let order: Vec<organize::Pick> = tree
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Folder { path, .. } => Some(organize::Pick::Folder(path.clone())),
+                Entry::Action { index, .. } => rows.get(*index).map(|r| organize::Pick::Action(r.name.clone())),
+            })
+            .collect();
+        let chosen = organize::selection(app);
+        let mods = ui.input(|i| i.modifiers);
+        for entry in tree {
             let (i, depth) = match entry {
                 Entry::Folder { path, depth, count } => {
+                    let pick = organize::Pick::Folder(path.clone());
                     let collapsed = app.ui.actions.collapsed_sets.contains(&path);
-                    let selected = app.ui.actions.selected_folder.as_deref() == Some(path.as_str());
-                    let result = draw_set_header(ui, &path, depth, count, collapsed, selected, &t);
-                    if result.toggled {
+                    let selected = chosen.contains(&pick);
+                    let naming = app.ui.actions.folder_rename.as_ref().is_some_and(|r| r.path == path);
+                    let carry = if selected { chosen.clone() } else { vec![pick.clone()] };
+                    let result = draw_set_header(ui, &path, depth, count, collapsed, selected, naming, carry, &t);
+                    if naming {
+                        organize::rename_field(app, ui, &path, result.name_rect);
+                    }
+                    if result.response.clicked() && organize::click(app, pick.clone(), mods, &order) {
+                        // A plain click also opens or closes the folder.
                         set_toggled = Some(path.clone());
                     }
-                    if result.save {
-                        save_set = Some(path.clone());
+                    if result.response.double_clicked() && result.response.interact_pointer_pos().is_some_and(|p| result.name_rect.contains(p)) {
+                        organize::start_rename(app, &path);
                     }
-                    if let Some(index) = result.dropped {
-                        dropped_in = Some((index, path.clone()));
+                    if result.response.secondary_clicked() && !chosen.contains(&pick) {
+                        organize::select_only(app, &pick);
                     }
-                    if let Some(a) = result.action {
-                        folder_action = Some((a, path));
+                    result.response.context_menu(|ui| {
+                        organize::item_menu(app, ui, &pick);
+                        ui.separator();
+                        if ui.button(tl!("Save Set…")).clicked() {
+                            save_set = Some(path.clone());
+                            ui.close();
+                        }
+                    });
+                    match result.dropped {
+                        Some(Dropped::Row(index)) => {
+                            // A dragged action that's selected brings the rest of the selection.
+                            let name = rows.get(index).map(|r| r.name.clone()).unwrap_or_default();
+                            let dragged = organize::Pick::Action(name);
+                            dropped_in = Some((if chosen.contains(&dragged) { chosen.clone() } else { vec![dragged] }, Some(path.clone())));
+                        }
+                        Some(Dropped::Picks(picks)) => dropped_in = Some((picks, Some(path.clone()))),
+                        None => {}
                     }
                     continue;
                 }
@@ -1377,7 +1289,7 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 ui.scroll_to_rect(rect, Some(egui::Align::BOTTOM));
             }
             let button_mode = app.ui.actions.button_mode;
-            let sel = app.ui.actions.selected == Some(i) && app.ui.actions.selected_step.is_none();
+            let sel = chosen.contains(&organize::Pick::Action(name.clone()));
             resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, sel, name));
             if button_mode {
                 ui.painter().rect_filled(rect, 3.0, button_fill(swatch, &t));
@@ -1430,10 +1342,7 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             if recording_this {
                 ui.painter().circle_filled(pos2(rect.right() - 64.0, rect.center().y), 4.0, Color32::from_rgb(230, 60, 60));
             }
-            if resp.clicked() {
-                app.ui.actions.selected = Some(i);
-                app.ui.actions.selected_step = None;
-                app.ui.actions.selected_folder = None;
+            if resp.clicked() && organize::click(app, organize::Pick::Action(name.clone()), mods, &order) {
                 if button_mode {
                     if !resp.double_clicked() {
                         play_idx = Some(i);
@@ -1447,6 +1356,9 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             }
             // Clicks inside stay open, so Shift and Command can both be ticked; every item that
             // finishes closes the menu itself.
+            if resp.secondary_clicked() && !chosen.contains(&organize::Pick::Action(name.clone())) {
+                organize::select_only(app, &organize::Pick::Action(name.clone()));
+            }
             action_context_menu(app, &resp, i, name, swatch);
             if resp.double_clicked() && !button_mode {
                 // Photoshop renames in place when the name itself is double-clicked.
@@ -1464,6 +1376,29 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 dialog_toggled = dialog_toggled.or(events.dialog_toggled);
             }
         }
+        // The list's empty end: a click clears the selection, a right-click offers New Folder and
+        // Paste, and items dropped there go to the top level.
+        let rest = ui.available_height().max(28.0);
+        let (end, end_resp) = ui.allocate_exact_size(vec2(ui.available_width(), rest), Sense::click());
+        let carrying = end_resp.dnd_hover_payload::<DragRow>().is_some_and(|p| p.step.is_none()) || end_resp.dnd_hover_payload::<organize::DragPicks>().is_some();
+        if carrying {
+            ui.painter().rect_stroke(end.shrink(2.0), 3.0, Stroke::new(2.0, t.accent), egui::StrokeKind::Inside);
+            ui.painter().text(end.center_top() + vec2(0.0, 14.0), Align2::CENTER_CENTER, tl!("Move to top level"), egui::FontId::proportional(11.0), t.text_dim);
+        }
+        // Take only the payload type being carried: taking another type drops the payload.
+        if egui::DragAndDrop::has_payload_of_type::<DragRow>(ui.ctx()) {
+            if let Some(row) = end_resp.dnd_release_payload::<DragRow>().filter(|p| p.step.is_none()) {
+                let name = rows.get(row.action).map(|r| r.name.clone()).unwrap_or_default();
+                let dragged = organize::Pick::Action(name);
+                dropped_in = Some((if chosen.contains(&dragged) { chosen.clone() } else { vec![dragged] }, None));
+            }
+        } else if let Some(picks) = end_resp.dnd_release_payload::<organize::DragPicks>() {
+            dropped_in = Some((picks.0.clone(), None));
+        }
+        if end_resp.clicked() {
+            organize::clear(app);
+        }
+        end_resp.context_menu(|ui| organize::empty_menu(app, ui));
     });
     if let Some((action, step)) = toggled {
         let _ = app.run("actions.toggle", json!({"action": action, "step": step}));
@@ -1471,29 +1406,16 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     if let Some((action, step)) = dialog_toggled {
         let _ = app.run("actions.dialog", json!({"action": action, "step": step}));
     }
-    if let Some((action, folder)) = folder_action {
-        match action {
-            FolderAction::NewSubfolder => open_folder_prompt(app, FolderPromptKind::New { parent: Some(folder) }),
-            FolderAction::Rename => open_folder_prompt(app, FolderPromptKind::Rename { folder }),
-            FolderAction::Delete => confirm_delete_folder(app, folder),
-        }
-    }
-    if let Some((index, folder)) = dropped_in {
-        // Dropped on a folder row: the action goes inside, and the folder opens to show it.
-        if app.run("actions.moveToFolder", json!({"action": index, "folder": folder})).is_ok() {
-            app.ui.actions.collapsed_sets.retain(|c| !photocraft_engine::actions_cmds::folders::within(&folder, c));
-            app.ui.actions.selected = Some(index);
-            app.ui.actions.selected_step = None;
-            app.ui.actions.selected_folder = None;
+    if let Some((picks, target)) = dropped_in {
+        // Dropped on a folder row (inside it, which opens) or the list's end (the top level).
+        if let Err(e) = organize::move_into(app, &picks, target) {
+            app.ui.status = e;
+            app.ui.status_error = true;
         }
         set_toggled = None;
     }
     if let Some(set) = set_toggled {
-        // A click selects the folder alone (New Subfolder goes inside it, Delete deletes it) and
-        // opens or closes it.
-        app.ui.actions.selected_folder = Some(set.clone());
-        app.ui.actions.selected = None;
-        app.ui.actions.selected_step = None;
+        // A plain click on a folder (already selected by it) also opens or closes it.
         match app.ui.actions.collapsed_sets.iter().position(|c| *c == set) {
             Some(i) => {
                 app.ui.actions.collapsed_sets.remove(i);
@@ -1537,17 +1459,15 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         if crate::icons::button(ui, "plus", 24.0, false, tl!("Create new action")).clicked() && !recording_now {
             begin_recording(app, false);
         }
-        if crate::icons::button(ui, "folder-plus", 24.0, false, tl!("New folder")).clicked() {
-            open_folder_prompt(app, FolderPromptKind::New { parent: None });
+        // One button: a folder inside the selected folder (or next to the selected action), else
+        // at the top level, named where it appears.
+        let folder = crate::icons::button(ui, "folder-plus", 24.0, false, tl!("New folder (inside the selected folder)"));
+        folder.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tl!("New folder")));
+        if folder.clicked() {
+            organize::new_folder(app);
         }
-        let parent = app.ui.actions.selected_folder.clone().filter(|f| photocraft_engine::actions_cmds::folders::all(&app.session.actions).contains(f));
-        let sub = ui.add_enabled(parent.is_some(), egui::Button::new(tl!("+ Subfolder")).small()).on_hover_text(tl!("New subfolder inside the selected folder"));
-        sub.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, parent.is_some(), tl!("+ Subfolder")));
-        if sub.clicked() {
-            open_folder_prompt(app, FolderPromptKind::New { parent });
-        }
-        let can_delete =
-            (app.ui.actions.selected.is_some() && (!recording_now || app.ui.actions.selected_step.is_some())) || (!recording_now && selected_folder(app).is_some());
+        let any_selected = !organize::selection(app).is_empty();
+        let can_delete = (app.ui.actions.selected_step.is_some() && app.ui.actions.selected.is_some()) || (!recording_now && any_selected);
         ui.add_enabled_ui(can_delete, |ui| {
             let response = crate::icons::button(ui, "trash", 24.0, false, tl!("Delete"));
             response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, can_delete, tl!("Delete")));
@@ -1563,7 +1483,7 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         }
     });
     shortcut_capture_window(app, ui.ctx());
-    folder_prompt_window(app, ui.ctx());
+    organize::delete_window(app, ui.ctx());
     if let Some(i) = play_idx {
         match app.run("actions.play", json!({"action": i})) {
             Ok(v) => report_play(app, &v),
@@ -1673,6 +1593,8 @@ fn draw_step_controls(ui: &mut egui::Ui, rect: Rect, step: usize, label: &str, c
     );
     (check.on_hover_text(tl!("Include in playback")), dialog.on_hover_text(tl!("Show dialog during playback")))
 }
+
+mod organize;
 
 #[cfg(test)]
 mod tests;

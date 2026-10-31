@@ -1321,18 +1321,20 @@ fn nested_folders_show_as_a_tree() {
     let skin = h.get_by_label("Skin").rect();
     assert!(h.get_by_label("Retouch").rect().top() < skin.top());
     assert!(h.get_by_label("Glow").rect().top() > skin.top());
-    // Clicking a folder selects it; + Subfolder then makes one inside it.
+    // Clicking a folder selects it; the folder button then makes one inside it, named in place.
     h.get_by_label("Skin").click();
     h.run_steps(3);
     assert_eq!(h.state().ui.actions.selected_folder.as_deref(), Some("Retouch/Skin"));
-    h.get_by_label("+ Subfolder").click();
+    h.get_by_label("New folder").click();
     h.run_steps(3);
-    h.get_by_label("Name:");
-    h.state_mut().ui.actions.folder_prompt.as_mut().unwrap().text = "Eyes".into();
-    h.get_by_label("OK").click();
+    assert!(photocraft_engine::actions_cmds::folders::all(&h.state().session.actions).contains(&"Retouch/Skin/New Folder".to_string()));
+    let naming = h.state().ui.actions.folder_rename.clone().expect("named in place");
+    assert_eq!(naming.path, "Retouch/Skin/New Folder");
+    h.get_by_label("Folder name").type_text("Eyes");
+    h.key_press(egui::Key::Enter);
     h.run_steps(3);
-    assert!(h.state().ui.actions.folder_prompt.is_none());
     assert!(photocraft_engine::actions_cmds::folders::all(&h.state().session.actions).contains(&"Retouch/Skin/Eyes".to_string()));
+
 }
 
 /// Dragging an action onto a folder row files it there; clicking a folder selects it alone (the
@@ -1378,10 +1380,98 @@ fn actions_drop_into_folders_and_a_selected_folder_deletes() {
     // Delete with the folder selected asks first, then removes it with its subfolder and action.
     delete_selection(h.state_mut());
     h.run_steps(2);
-    assert!(h.state().ui.actions.folder_prompt.is_some(), "Delete asks before deleting a folder");
-    h.get_by_role_and_label(egui::accesskit::Role::Button, "Delete Folder").click();
+    assert!(h.state().ui.actions.delete_prompt.is_some(), "Delete asks before deleting a folder");
+    h.get_by_label("Yes, Delete").click();
     h.run_steps(3);
     let st = h.state();
     assert!(photocraft_engine::actions_cmds::folders::all(&st.session.actions).is_empty(), "folder and subfolder deleted");
     assert_eq!(st.session.actions.list.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Keep"]);
+}
+
+fn organize_app() -> PhotocraftApp {
+    let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+    for n in ["A", "B", "C"] {
+        app.session.actions.list.push(Action::new(n, vec![("filter.blur.blur".into(), json!({}))]));
+    }
+    app.run("actions.newFolder", json!({"name": "One"})).unwrap();
+    app.run("actions.newFolder", json!({"name": "Two"})).unwrap();
+    app
+}
+
+fn names_in(app: &PhotocraftApp, folder: Option<&str>) -> Vec<String> {
+    app.session.actions.list.iter().filter(|a| a.set.as_deref() == folder).map(|a| a.name.clone()).collect()
+}
+
+/// ⌘/Ctrl-click adds and removes items, ⇧-click selects a range, and the selection moves into a
+/// folder together.
+#[test]
+fn several_actions_and_folders_select_and_move_together() {
+    use organize::Pick;
+    let mut app = organize_app();
+    let order = vec![Pick::Action("A".into()), Pick::Action("B".into()), Pick::Action("C".into()), Pick::Folder("One".into()), Pick::Folder("Two".into())];
+    let cmd = egui::Modifiers::COMMAND;
+    assert!(organize::click(&mut app, order[0].clone(), egui::Modifiers::NONE, &order));
+    organize::click(&mut app, order[2].clone(), cmd, &order);
+    assert_eq!(organize::selection(&app), [order[0].clone(), order[2].clone()]);
+    organize::click(&mut app, order[0].clone(), cmd, &order);
+    assert_eq!(organize::selection(&app), [order[2].clone()], "⌘-click again removes it");
+    organize::click(&mut app, order[4].clone(), egui::Modifiers::SHIFT, &order);
+    assert_eq!(organize::selection(&app), order[2..].to_vec(), "⇧-click selects the range, folders too");
+    // Move "C" and folder "One" into "Two".
+    let picks = vec![order[2].clone(), order[3].clone()];
+    organize::move_into(&mut app, &picks, Some("Two".into())).unwrap();
+    assert_eq!(names_in(&app, Some("Two")), ["C"]);
+    assert!(photocraft_engine::actions_cmds::folders::all(&app.session.actions).contains(&"Two/One".to_string()));
+    assert!(organize::selection(&app).is_empty());
+    // A folder never goes inside itself.
+    organize::move_into(&mut app, &[Pick::Folder("Two".into())], Some("Two/One".into())).unwrap();
+    assert!(photocraft_engine::actions_cmds::folders::all(&app.session.actions).contains(&"Two/One".to_string()));
+}
+
+/// Copy, Paste and Duplicate: copies take free names, and a copied folder brings its contents.
+#[test]
+fn copy_paste_and_duplicate_actions_and_folders() {
+    use organize::Pick;
+    let mut app = organize_app();
+    app.run("actions.moveToFolder", json!({"action": "B", "folder": "One"})).unwrap();
+    app.run("actions.newFolder", json!({"name": "Inner", "parent": "One"})).unwrap();
+    app.run("actions.moveToFolder", json!({"action": "C", "folder": "One/Inner"})).unwrap();
+    // Duplicate an action: "A copy" next to it.
+    organize::duplicate(&mut app, &[Pick::Action("A".into())]).unwrap();
+    assert_eq!(names_in(&app, None), ["A", "A copy"]);
+    // Copy folder "One" and paste it into "Two": "Two/One" with its subfolder and actions.
+    let copied = organize::copy(&app, &[Pick::Folder("One".into())]);
+    organize::paste(&mut app, &copied, Some("Two".into())).unwrap();
+    let all = photocraft_engine::actions_cmds::folders::all(&app.session.actions);
+    assert!(all.contains(&"Two/One".to_string()) && all.contains(&"Two/One/Inner".to_string()), "{all:?}");
+    assert_eq!(names_in(&app, Some("Two/One")), ["B copy"]);
+    assert_eq!(names_in(&app, Some("Two/One/Inner")), ["C copy"]);
+    // Duplicating a folder in place: "One 2" beside it.
+    organize::duplicate(&mut app, &[Pick::Folder("One".into())]).unwrap();
+    assert!(photocraft_engine::actions_cmds::folders::all(&app.session.actions).contains(&"One 2/Inner".to_string()));
+    let steps = &app.session.actions.list.iter().find(|a| a.name == "C copy").unwrap().steps;
+    assert_eq!(steps.len(), 1, "copies keep their steps");
+}
+
+/// Dragging a folder row onto another folder moves it there with what's inside.
+#[test]
+fn a_folder_dragged_onto_another_goes_inside() {
+    use egui_kittest::{Harness, kittest::Queryable};
+    let mut app = organize_app();
+    app.run("actions.moveToFolder", json!({"action": "A", "folder": "One"})).unwrap();
+    let mut h = Harness::builder().with_size(vec2(400.0, 420.0)).build_ui_state(|ui, app| panel(app, ui), app);
+    h.run_steps(3);
+    let from = h.get_by_label("One").rect().center();
+    let to = h.get_by_label("Two").rect().center();
+    h.event(egui::Event::PointerMoved(from));
+    h.run_steps(1);
+    h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.run_steps(1);
+    h.event(egui::Event::PointerMoved(from + vec2(10.0, 0.0)));
+    h.run_steps(2);
+    h.event(egui::Event::PointerMoved(to));
+    h.run_steps(2);
+    h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.run_steps(3);
+    assert_eq!(names_in(h.state(), Some("Two/One")), ["A"]);
 }

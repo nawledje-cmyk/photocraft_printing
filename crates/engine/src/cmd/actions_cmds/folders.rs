@@ -5,7 +5,7 @@
 
 use serde_json::{Value, json};
 
-use super::{ActionState, PLAY_SHORTCUT_PREFIX, always, bad, not_playing, resolve};
+use super::{Action, ActionState, PLAY_SHORTCUT_PREFIX, always, bad, not_playing, resolve};
 use crate::commands::CommandSpec;
 use crate::{Result, Session};
 
@@ -92,6 +92,28 @@ fn folder_param(s: &Session, cmd: &str, p: &Value, key: &str, optional: bool) ->
 
 fn join(parent: Option<&str>, name: &str) -> String {
     parent.map_or_else(|| name.to_string(), |p| format!("{p}{SEP}{name}"))
+}
+
+/// A name for a new folder in `parent` that no folder there has: `base`, else `base 2`, `base 3`…
+pub fn unique_child(state: &ActionState, parent: Option<&str>, base: &str) -> String {
+    let taken = all(state);
+    let free = |name: &str| !taken.contains(&join(parent, name));
+    if free(base) {
+        return base.to_string();
+    }
+    (2..10_000).map(|n| format!("{base} {n}")).find(|n| free(n)).unwrap_or_else(|| format!("{base} {}", taken.len() + 1))
+}
+
+/// An action name no action has: `base`, else `base copy`, `base copy 2`…
+pub fn unique_action_name(state: &ActionState, base: &str) -> String {
+    let free = |name: &str| !state.list.iter().any(|a| a.name == name);
+    if free(base) {
+        return base.to_string();
+    }
+    std::iter::once(format!("{base} copy"))
+        .chain((2..10_000).map(|n| format!("{base} copy {n}")))
+        .find(|n| free(n))
+        .unwrap_or_else(|| format!("{base} copy {}", state.list.len() + 1))
 }
 
 /// `actions.newFolder`.
@@ -185,8 +207,98 @@ fn move_to_folder(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"action": name, "folder": folder}))
 }
 
+/// `actions.add`: a copy of an action (Copy and Paste, Duplicate), named apart from the others.
+fn add(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "actions.add";
+    not_playing(s, cmd)?;
+    let mut action: Action = match p.get("action") {
+        Some(v @ Value::Object(_)) => serde_json::from_value(v.clone()).map_err(|e| bad(cmd, format!("\"action\" is not an action: {e}")))?,
+        _ => return Err(bad(cmd, "needs \"action\" ({name, steps, …})")),
+    };
+    let base = action.name.trim().to_string();
+    if base.is_empty() {
+        return Err(bad(cmd, "the action's name is empty"));
+    }
+    if p.get("folder").is_none() && action.set.is_some() {
+        // Keep the folder the action names, when it exists.
+        let known = all(&s.actions);
+        action.set = action.set.filter(|f| known.contains(f));
+    } else {
+        action.set = folder_param(s, cmd, p, "folder", true)?;
+    }
+    let steps = action.steps.len();
+    action.disabled.retain(|i| *i < steps);
+    action.dialogs.retain(|i| *i < steps);
+    if !super::BUTTON_COLORS.contains(&action.color.as_str()) {
+        action.color.clear();
+    }
+    action.name = unique_action_name(&s.actions, &base);
+    let name = action.name.clone();
+    s.actions.list.push(action);
+    s.actions.touch();
+    Ok(json!({"action": name, "index": s.actions.list.len() - 1}))
+}
+
+/// `actions.moveFolder`: a folder, with its subfolders and actions, into another folder or out to
+/// the top level.
+fn move_folder(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "actions.moveFolder";
+    not_playing(s, cmd)?;
+    let Some(old) = folder_param(s, cmd, p, "folder", false)? else { return Err(bad(cmd, "needs \"folder\"")) };
+    if p.get("into").is_none() {
+        return Err(bad(cmd, "needs \"into\" (a folder path, or null for the top level)"));
+    }
+    let into = folder_param(s, cmd, p, "into", true)?;
+    if into.as_deref().is_some_and(|i| within(i, &old)) {
+        return Err(bad(cmd, "a folder can't go inside itself"));
+    }
+    let new = join(into.as_deref(), leaf(&old));
+    if new == old {
+        return Ok(json!({"folder": new, "was": old}));
+    }
+    if all(&s.actions).contains(&new) {
+        return Err(bad(cmd, format!("a folder \"{}\" is already there", leaf(&old))));
+    }
+    let deepest = all(&s.actions).iter().filter(|f| within(f, &old)).map(|f| depth(f) - depth(&old)).max().unwrap_or(0);
+    if depth(&new) + deepest >= MAX_DEPTH {
+        return Err(bad(cmd, format!("folders nest at most {MAX_DEPTH} deep")));
+    }
+    let moved = |path: &str| -> Option<String> { within(path, &old).then(|| format!("{new}{}", &path[old.len()..])) };
+    // Folders an action names exist through it: keep every moved folder, so empty ones survive.
+    let mut kept: Vec<String> = all(&s.actions).iter().filter_map(|f| moved(f)).collect();
+    s.actions.folders.retain(|f| !within(f, &old));
+    s.actions.folders.append(&mut kept);
+    for a in s.actions.list.iter_mut() {
+        if let Some(m) = a.set.as_deref().and_then(moved) {
+            a.set = Some(m);
+        }
+    }
+    s.actions.touch();
+    Ok(json!({"folder": new, "was": old}))
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
+        CommandSpec {
+            id: "actions.add",
+            label: "Add Action",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"action":{name, steps:[[id, params]…], disabled?, dialogs?, color?, set?}, "folder":path|null?} → {action, index}. Adds a copy of an action (Paste, Duplicate); a taken name gets " copy" (then " copy 2"…). Without "folder" it keeps the action's own set when that folder exists."##,
+            enabled: always,
+            run: add,
+            journal: false,
+        },
+        CommandSpec {
+            id: "actions.moveFolder",
+            label: "Move Action Folder",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"folder":path, "into":path|null} → {folder, was}. Moves the folder, its subfolders and actions inside "into" (null: the top level). Not into itself or a folder of the same name."##,
+            enabled: always,
+            run: move_folder,
+            journal: false,
+        },
         CommandSpec {
             id: "actions.newFolder",
             label: "New Action Folder",

@@ -1202,3 +1202,26 @@ fn action_folders_round_trip_through_actions_json() {
     let old: ActionsFile = serde_json::from_value(json!({"version": 1, "actions": []})).unwrap();
     assert!(old.folders.is_empty());
 }
+
+/// actions.add copies an action under a free name; actions.moveFolder moves a folder with its
+/// contents and refuses to put one inside itself.
+#[test]
+fn action_add_and_move_folder() {
+    let mut s = Session::new();
+    s.actions.list.push(Action::new("A", vec![("filter.blur.blur".into(), json!({}))]));
+    s.execute("actions.newFolder", json!({"name": "One"})).unwrap();
+    s.execute("actions.newFolder", json!({"name": "Two"})).unwrap();
+    let a = serde_json::to_value(&s.actions.list[0]).unwrap();
+    assert_eq!(s.execute("actions.add", json!({"action": a, "folder": "One"})).unwrap()["action"], "A copy");
+    assert_eq!(s.execute("actions.add", json!({"action": a})).unwrap()["action"], "A copy 2");
+    assert!(s.execute("actions.add", json!({"action": {"name": ""}})).is_err());
+    assert!(s.execute("actions.add", json!({"action": 5})).is_err());
+    assert!(s.execute("actions.add", json!({"action": a, "folder": "Missing"})).is_err());
+    s.execute("actions.moveFolder", json!({"folder": "One", "into": "Two"})).unwrap();
+    assert_eq!(s.actions.list.iter().find(|x| x.name == "A copy").unwrap().set.as_deref(), Some("Two/One"));
+    assert!(s.execute("actions.moveFolder", json!({"folder": "Two", "into": "Two/One"})).is_err(), "not inside itself");
+    assert!(s.execute("actions.moveFolder", json!({"folder": "Two"})).is_err());
+    s.execute("actions.moveFolder", json!({"folder": "Two/One", "into": null})).unwrap();
+    assert!(folders::all(&s.actions).contains(&"One".to_string()));
+    assert!(folders::all(&s.actions).contains(&"Two".to_string()), "the emptied folder stays");
+}
