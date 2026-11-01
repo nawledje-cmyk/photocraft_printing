@@ -95,6 +95,7 @@ pub const SHELL_COMMANDS: &[(&str, &str, &[&str], Option<&str>)] = &[
     ("help.github", "PhotoCraft on GitHub", &["Help"], None),
     ("help.reportIssue", "Report an Issue…", &["Help"], None),
     ("help.systemInfo", "System Info…", &["Help"], None),
+    ("help.performanceLogging", "Performance Logging", &["Help"], None),
     ("help.about", "About PhotoCraft", &["Help"], None),
 ];
 

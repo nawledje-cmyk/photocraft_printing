@@ -286,6 +286,7 @@ fn play_owned(app: &mut PhotocraftApp, params: &Value, suspended: Option<Value>)
     // Each step's time, for the log when the action is slow (frame_stages names only the action).
     let mut timings: Vec<(String, f64)> = Vec::new();
     let played_at = crate::gpu_canvas::now_ms();
+    let last_step = action.enabled_steps().last().map(|(i, _)| i);
     for (i, (id, p)) in action.enabled_steps().skip_while(|(i, _)| *i < from) {
         let step_at = crate::gpu_canvas::now_ms();
         if !actions_cmds::consume_playback_step(&mut app.session) {
@@ -321,8 +322,11 @@ fn play_owned(app: &mut PhotocraftApp, params: &Value, suspended: Option<Value>)
             play(app, p)
         } else if actions_cmds::shell_save_command(id) {
             // Write synchronously, so the next step doesn't meet a document locked by a
-            // background save.
-            let background = std::mem::replace(&mut app.background_jobs, false);
+            // background save; the last step of a played action has no next step, so it saves
+            // in the background as File › Save As does (it took ~0.4 s on the UI thread).
+            let last = Some(i) == last_step && app.session.actions.playing == 1;
+            let keep = app.background_jobs && last;
+            let background = std::mem::replace(&mut app.background_jobs, keep);
             let r = app.replay_save(id, p);
             app.background_jobs = background;
             r
@@ -379,7 +383,7 @@ fn play_owned(app: &mut PhotocraftApp, params: &Value, suspended: Option<Value>)
 
 /// An action that took long enough to be felt: the log names its steps and their times.
 fn log_slow_playback(name: &str, total_ms: f64, timings: &[(String, f64)]) {
-    if total_ms < 50.0 {
+    if total_ms < 50.0 || !crate::frame_stages::logging() {
         return;
     }
     let steps: Vec<String> = timings.iter().map(|(id, ms)| format!("{id} {ms:.1} ms")).collect();

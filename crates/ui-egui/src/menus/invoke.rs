@@ -323,6 +323,15 @@ pub(crate) fn invoke_unguarded(app: &mut PhotocraftApp, ctx: &egui::Context, id:
             Ok(Value::Null)
         }
         "help.about" => Ok(json!({"dialog": app.ui.open_dialog(DialogKind::About, Default::default())})),
+        "help.performanceLogging" => {
+            app.ui.perf_logging = !app.ui.perf_logging;
+            crate::frame_stages::set_logging(app.ui.perf_logging);
+            let on = app.ui.perf_logging;
+            log::info!("performance logging {}", if on { "on" } else { "off" });
+            app.ui.status = if on { tl!("Performance logging is on") } else { tl!("Performance logging is off") }.to_string();
+            app.ui.status_error = false;
+            Ok(json!(on))
+        }
         "help.systemInfo" => {
             let mut fields = serde_json::Map::new();
             fields.insert("systemInfo".into(), json!(true));

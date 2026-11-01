@@ -90,6 +90,9 @@ pub(crate) struct MovePreview {
     above_area: Rect,
     /// A whole layer dragged that way ([`layer_overlay_doc`]): its pixels and where they are.
     source: Option<(photocraft_raster::Surface, Rect)>,
+    /// The offset [`draw_content`] last drew that layer at: its outline goes there too, so the
+    /// two move in lockstep (the picture is painted before the frame's pointer events are read).
+    drawn: Option<(i32, i32)>,
     /// The piece's textures for that drag, built on the first frame drawn ([`draw_content`]).
     overlay: Option<FloatOverlay>,
 }
@@ -162,7 +165,7 @@ pub(crate) fn display_doc(app: &mut PhotocraftApp, idx: usize) -> Option<(Arc<Do
         let moving = with_descendants(&doc, &ids);
         let bounds = bounds.map(|b| moving.iter().filter_map(|id| shape_reach(doc.layer(*id)?, canvas)).fold(b, |acc, r| acc.union(&r)));
         app.move_preview =
-            Some(MovePreview { doc: doc_id, revision, ids, moving, bounds, canvas, offsets: Vec::new(), shown: None, floating: false, base: None, above_area: Rect::EMPTY, source: None, overlay: None });
+            Some(MovePreview { doc: doc_id, revision, ids, moving, bounds, canvas, offsets: Vec::new(), shown: None, floating: false, base: None, above_area: Rect::EMPTY, source: None, drawn: None, overlay: None });
     }
     // One plain pixel layer dragged: the canvas shows the document without it (composited once)
     // and draws its pixels over that at the pointer, instead of compositing every offset.
@@ -224,7 +227,7 @@ pub(crate) fn shown_layer_offset(app: &PhotocraftApp, doc: DocId, revision: u64,
     }
     // Drawn over the canvas at the drag's offset (layer_overlay_doc), or composited there.
     if p.base.is_some() {
-        return drag_offset(app);
+        return p.drawn.or_else(|| drag_offset(app));
     }
     p.shown.as_ref()?;
     p.offsets.last().copied()
@@ -262,6 +265,7 @@ fn floating_doc(app: &mut PhotocraftApp, idx: usize) -> Option<(Arc<Document>, u
             base: None,
             above_area: Rect::EMPTY,
             source: None,
+            drawn: None,
             overlay: None,
         });
     }
@@ -438,6 +442,9 @@ pub(crate) fn draw_content(app: &mut PhotocraftApp, painter: &egui::Painter, xf:
         drag_offset(app)
     };
     let Some(offset) = offset else { return };
+    if !floating && let Some(p) = app.move_preview.as_mut() {
+        p.drawn = Some(offset);
+    }
     let Some(st) = app.session.active() else { return };
     let doc = st.doc.clone();
     let (layer, source) = if floating {
@@ -503,6 +510,12 @@ pub(crate) fn damage(app: &PhotocraftApp, doc: DocId, revision: u64, seen: u64, 
 }
 
 /// Whether the canvas shows a Move drag's layers at the pointer.
+/// Where [`draw_content`] last drew a whole layer dragged as a picture (tests).
+#[cfg(test)]
+pub(crate) fn drawn_offset(app: &PhotocraftApp) -> Option<(i32, i32)> {
+    app.move_preview.as_ref().and_then(|p| p.drawn)
+}
+
 pub(crate) fn showing(app: &PhotocraftApp) -> bool {
     app.move_preview.as_ref().is_some_and(|p| p.shown.is_some() || (!p.floating && p.base.is_some()))
 }

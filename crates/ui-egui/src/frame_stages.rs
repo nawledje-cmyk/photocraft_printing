@@ -246,11 +246,11 @@ impl SlowFrames {
         s.present_ms = s.cpu_prev_ms.zip(self.prev_ui_ms).map(|(cpu, ui)| (cpu - ui).max(0.0));
         self.prev_ui_ms = Some(s.ui_ms);
         let slow = !s.frame_ms.is_nan() && s.frame_ms > self.threshold_ms;
-        if let Some(line) = self.push(&s) {
-            log::info!("{line}");
-        }
-        if let Some(line) = self.minute.add(&s, slow) {
-            log::info!("{line}");
+        let (line, minute) = (self.push(&s), self.minute.add(&s, slow));
+        if logging() {
+            for line in [line, minute].into_iter().flatten() {
+                log::info!("{line}");
+            }
         }
         s
     }
@@ -412,4 +412,16 @@ mod app_tests {
         assert!(f.composite_ms > 0.0 && f.command_ms > 0.0, "{f:?}");
         assert!(f.stage_ms() <= f.frame_ms, "{f:?}");
     }
+}
+
+/// Help › Performance Logging (`UiState::perf_logging`): whether performance lines are logged.
+static LOGGING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub(crate) fn set_logging(on: bool) {
+    LOGGING.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether performance lines (slow frames, the minute summary, slow actions) are logged.
+pub(crate) fn logging() -> bool {
+    LOGGING.load(std::sync::atomic::Ordering::Relaxed)
 }

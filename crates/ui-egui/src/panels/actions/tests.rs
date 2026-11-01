@@ -1545,3 +1545,37 @@ fn click_point(h: &mut egui_kittest::Harness<'_, PhotocraftApp>, pos: egui::Pos2
     h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
     h.run_steps(1);
 }
+
+/// A save that ends a played action writes in the background (as File › Save As does); one with
+/// steps after it still writes before they run.
+#[test]
+fn a_save_that_ends_an_action_writes_in_the_background() {
+    let dir = std::env::temp_dir().join(format!("photocraft-last-save-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let last = dir.join("last.png").to_string_lossy().to_string();
+    let middle = dir.join("middle.png").to_string_lossy().to_string();
+    let mut app = disk_app(vec![]);
+    app.services.save_file = Some(std::sync::Arc::new(|doc, path, _, _| {
+        let r = photocraft_io::export(doc, path, &Default::default()).map_err(|e| e.to_string())?;
+        std::fs::write(path, r.bytes).map_err(|e| e.to_string())?;
+        Ok(r.warnings)
+    }));
+    app.run("file.new", json!({"width": 16, "height": 16})).unwrap();
+    app.background_jobs = true;
+    app.session.actions.list.push(Action::new("Then", vec![("file.saveAs".into(), json!({"path": middle})), ("layer.new.layer".into(), json!({}))]));
+    app.session.actions.list.push(Action::new("Last", vec![("layer.new.layer".into(), json!({})), ("file.saveAs".into(), json!({"path": last}))]));
+    let v = play(&mut app, &json!({"action": "Then"})).unwrap();
+    assert_eq!(v["ran"], 2, "{v}");
+    assert!(std::path::Path::new(&middle).exists(), "written before the next step");
+    let ctx = egui::Context::default();
+    let v = play(&mut app, &json!({"action": "Last"})).unwrap();
+    assert_eq!(v["ran"], 2, "{v}");
+    assert!(app.saving(), "the last step's save runs in the background");
+    let t0 = std::time::Instant::now();
+    while app.saving() && t0.elapsed() < std::time::Duration::from_secs(20) {
+        crate::jobs_ui::tick(&mut app, &ctx);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(std::path::Path::new(&last).exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}

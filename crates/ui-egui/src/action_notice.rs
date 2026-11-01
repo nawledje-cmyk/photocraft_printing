@@ -76,7 +76,7 @@ pub(crate) fn draw(app: &mut PhotocraftApp, ctx: &egui::Context) {
     };
     let text = n.text.clone();
     let busy = n.kind == Kind::Busy;
-    egui::Area::new(egui::Id::new("action-notice"))
+    egui::Area::new(egui::Id::unique("action-notice"))
         .order(egui::Order::Tooltip)
         .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 72.0))
         .interactable(false)

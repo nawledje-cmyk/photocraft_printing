@@ -143,17 +143,16 @@ fn the_outline_moves_in_lockstep_with_a_fast_drag() {
     h.step();
     assert_eq!(active(&h), Some(b));
     assert_eq!(edges(&h), outline(&h, B.translate(-5, 0)));
-    // Big jumps, one per frame. A frame draws the layer where the previous frame's events left it
-    // (the image is painted before this frame's events are read), and the outline goes with it.
-    let mut shown = (-5, 0);
+    // Big jumps, one per frame. A plain layer is drawn as a picture over the canvas at the
+    // pointer in the frame its events are read (move_ui::layer_overlay_doc), and the outline goes
+    // with it, in the same frame.
     for (dx, dy) in [(-30, -10), (-36, -30), (-12, -36), (-40, 0)] {
         h.event(Event::PointerMoved(p0 + egui::vec2(dx as f32 * 4.0, dy as f32 * 4.0)));
         h.step();
-        assert_eq!(edges(&h), outline(&h, B.translate(shown.0, shown.1)), "drawn with the layer at {shown:?} while the pointer moved to {dx},{dy}");
-        // The next frame shows both at the pointer.
+        assert_eq!(crate::move_ui::drawn_offset(h.state()), Some((dx, dy)), "the layer is drawn at the pointer");
+        assert_eq!(edges(&h), outline(&h, B.translate(dx, dy)), "the outline is where the layer is drawn, at {dx},{dy}");
         h.step();
-        assert_eq!(edges(&h), outline(&h, B.translate(dx, dy)), "the outline is where the layer is shown, at {dx},{dy}");
-        shown = (dx, dy);
+        assert_eq!(edges(&h), outline(&h, B.translate(dx, dy)), "and stays there");
     }
     button(&mut h, p0 + egui::vec2(-160.0, 0.0), false);
     h.step();

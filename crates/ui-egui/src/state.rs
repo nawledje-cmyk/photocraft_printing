@@ -376,6 +376,10 @@ pub struct UiState {
     /// View extras: rulers (⌘R), grid (⌘'), guides (⌘;), snapping (⇧⌘;), locked guides (⌥⌘;).
     #[serde(default)]
     pub extras: Extras,
+    /// Help › Performance Logging: slow frames, the per-minute summary and slow actions' step
+    /// times go to the log file (`frame_stages`). On by default.
+    #[serde(default = "yes")]
+    pub perf_logging: bool,
     /// View / Window / Type preferences: screen mode, Extras, Show and Snap To, flip, arrangement.
     #[serde(default)]
     pub view: crate::view_cmds::ViewOptions,
@@ -525,6 +529,7 @@ impl Default for UiState {
             clone_offset: None,
             pattern_stamp_phase: None,
             extras: Extras::default(),
+            perf_logging: true,
             view: Default::default(),
             actions: Default::default(),
             layer_comp_selected: None,

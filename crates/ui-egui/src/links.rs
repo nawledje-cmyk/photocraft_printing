@@ -113,6 +113,7 @@ mod tests {
                 "help.checkForUpdates",
                 "---",
                 "help.systemInfo",
+                "help.performanceLogging",
                 "help.about"
             ]
         );

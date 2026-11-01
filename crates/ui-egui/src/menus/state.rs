@@ -58,7 +58,7 @@ pub fn is_enabled(app: &PhotocraftApp, id: &str) -> bool {
         | "window.panel.closeOthers"
         | "window.panel.minimize"
         | "window.panel.iconic" => !app.session.prefs().workspace_locked,
-        "file.open" | "file.exit" | "file.clearRecent" | "file.removeRecent" | "help.about" | "help.systemInfo" | "edit.search" => true,
+        "file.open" | "file.exit" | "file.clearRecent" | "file.removeRecent" | "help.about" | "help.systemInfo" | "help.performanceLogging" | "edit.search" => true,
         i if i.starts_with("file.openRecent.") => true,
         i if i.starts_with(DOCUMENT_ITEM) => true,
         i if crate::links::url_for(i).is_some() => true,
@@ -177,6 +177,7 @@ pub(super) fn checked(app: &PhotocraftApp, id: &str) -> Option<bool> {
     }
     let e = &app.ui.extras;
     match id {
+        "help.performanceLogging" => return Some(app.ui.perf_logging),
         "view.rulers" => return Some(e.rulers),
         "view.show.grid" => return Some(e.grid),
         "view.show.guides" => return Some(e.guides),

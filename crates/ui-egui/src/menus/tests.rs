@@ -535,3 +535,22 @@ fn proof_setup_presets_and_checkmarks() {
     let params = crate::filter_dialog::parse_spec(spec.params);
     assert!(matches!(&params[0].kind, crate::filter_dialog::Kind::Choice { options, .. } if options[0] == "srgb" && !options.iter().any(|v| v.contains('/'))));
 }
+
+/// Help › Performance Logging switches the performance lines off and on, and shows its state.
+#[test]
+fn performance_logging_toggles_from_the_help_menu() {
+    let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+    let ctx = egui::Context::default();
+    assert_eq!(checked(&app, "help.performanceLogging"), Some(true), "on by default");
+    assert!(crate::menus::is_enabled(&app, "help.performanceLogging"));
+    assert_eq!(invoke(&mut app, &ctx, "help.performanceLogging", json!({})).unwrap(), json!(false));
+    assert_eq!(checked(&app, "help.performanceLogging"), Some(false));
+    assert!(!crate::frame_stages::logging());
+    assert_eq!(invoke(&mut app, &ctx, "help.performanceLogging", json!({})).unwrap(), json!(true));
+    assert!(crate::frame_stages::logging());
+    // Kept with the other UI settings.
+    let saved: crate::UiState = serde_json::from_value(serde_json::to_value(&app.ui).unwrap()).unwrap();
+    assert!(saved.perf_logging);
+    let old: crate::UiState = serde_json::from_value(serde_json::json!({"tool": "Brush"})).unwrap_or_default();
+    assert!(old.perf_logging, "settings from before the switch keep logging on");
+}
