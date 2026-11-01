@@ -283,7 +283,11 @@ fn play_owned(app: &mut PhotocraftApp, params: &Value, suspended: Option<Value>)
     let mut ran = 0u64;
     let mut failed = None;
     let mut paused = None;
+    // Each step's time, for the log when the action is slow (frame_stages names only the action).
+    let mut timings: Vec<(String, f64)> = Vec::new();
+    let played_at = crate::gpu_canvas::now_ms();
     for (i, (id, p)) in action.enabled_steps().skip_while(|(i, _)| *i < from) {
+        let step_at = crate::gpu_canvas::now_ms();
         if !actions_cmds::consume_playback_step(&mut app.session) {
             failed = Some(json!({"step": i, "id": id, "error": format!("action playback exceeded the {}-step limit", actions_cmds::MAX_PLAYBACK_STEPS)}));
             break;
@@ -332,6 +336,7 @@ fn play_owned(app: &mut PhotocraftApp, params: &Value, suspended: Option<Value>)
         } else {
             app.session.execute(id, p.clone()).map_err(|e| e.to_string())
         };
+        timings.push((id.to_string(), crate::gpu_canvas::now_ms() - step_at));
         match result {
             Ok(value) => {
                 if let Some(error) = actions_cmds::nested_failure(id, &value).or_else(|| actions_cmds::save_target_closed(&app.session, id, target)) {
@@ -352,6 +357,7 @@ fn play_owned(app: &mut PhotocraftApp, params: &Value, suspended: Option<Value>)
         }
     }
     actions_cmds::finish_playback(&mut app.session, None, &action, from);
+    log_slow_playback(&action.name, crate::gpu_canvas::now_ms() - played_at, &timings);
     match paused.as_ref().and_then(|p| p.get("dialog")).and_then(Value::as_u64).and_then(|d| app.ui.dialog_mut(d)) {
         // Paused for a dialog: the call goes on after it, so recording stays suspended.
         Some(d) if failed.is_none() => {
@@ -369,6 +375,15 @@ fn play_owned(app: &mut PhotocraftApp, params: &Value, suspended: Option<Value>)
         (None, Some(p)) => json!({"action": action.name, "ran": ran, "paused": p}),
         (None, None) => json!({"action": action.name, "ran": ran}),
     })
+}
+
+/// An action that took long enough to be felt: the log names its steps and their times.
+fn log_slow_playback(name: &str, total_ms: f64, timings: &[(String, f64)]) {
+    if total_ms < 50.0 {
+        return;
+    }
+    let steps: Vec<String> = timings.iter().map(|(id, ms)| format!("{id} {ms:.1} ms")).collect();
+    log::info!("action \"{name}\" played in {total_ms:.1} ms: {}", steps.join(", "));
 }
 
 /// Execute the actual menu command, not a synthetic keystroke. Fit is deferred
