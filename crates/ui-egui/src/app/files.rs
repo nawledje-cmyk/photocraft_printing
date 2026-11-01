@@ -61,6 +61,10 @@ impl PhotocraftApp {
         if let Some(r) = preset_files_ui::open(self, name, bytes) {
             return r.map(|()| Vec::new());
         }
+        // A PDF with several pages: the user picks the pages first (Import PDF).
+        if crate::pdf_pages_ui::intercept(self, name, bytes, crate::pdf_pages_ui::Purpose::Open) {
+            return Ok(Vec::new());
+        }
         let name = &self.open_name(name);
         // Decoded on a worker: a tab with progress appears now, the document when it's ready
         // (warnings are shown then).

@@ -35,6 +35,7 @@ mod icon_data;
 pub mod icons;
 pub mod jobs_ui;
 pub(crate) mod action_notice;
+pub(crate) mod pdf_pages_ui;
 pub(crate) mod last_brush;
 pub mod links;
 pub mod menu_catalog;
@@ -378,6 +379,8 @@ pub struct PhotocraftApp {
     pub(crate) move_preview: Option<move_ui::MovePreview>,
     /// The pop-up that shows an action ran (from its shortcut or the panel): see `action_notice`.
     pub(crate) action_notice: Option<crate::action_notice::Notice>,
+    /// Import PDF: the page picker for a PDF with several pages, and the PDFs waiting for it.
+    pub(crate) pdf_pages: crate::pdf_pages_ui::PdfPages,
     /// Move tool › Show Highlight on Rollover: the last hover answer (`move_hover`).
     pub(crate) move_hover: Option<move_hover::Hover>,
     /// Smart Guides distances shown with ⌘ held over the canvas: the last answer (`move_distance`).

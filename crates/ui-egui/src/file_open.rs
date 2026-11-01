@@ -113,6 +113,10 @@ impl PhotocraftApp {
         if let Some(r) = crate::preset_files_ui::open(self, path, bytes) {
             return r.map(|()| Vec::new());
         }
+        // A PDF with several pages: the user picks the pages first (Import PDF).
+        if crate::pdf_pages_ui::intercept(self, &display_name(path), bytes, crate::pdf_pages_ui::Purpose::Open) {
+            return Ok(Vec::new());
+        }
         if self.background_jobs {
             // The path and Open Recent are recorded when the background open finishes.
             crate::jobs_ui::start_open(self, &display_name(path), Some(path.to_string()), crate::jobs_ui::bytes(bytes))?;
@@ -153,7 +157,8 @@ impl PhotocraftApp {
         // Documents opening in the background are read on the worker too (a 2 GB PSB read
         // would block the window). Preset files (brushes, gradients) go the usual way.
         let ext = std::path::Path::new(path).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-        if self.background_jobs && !crate::preset_files_ui::PRESET_EXTS.contains(&ext.as_str()) {
+        // A PDF is read here to count its pages (several show the Import PDF page picker).
+        if self.background_jobs && !crate::preset_files_ui::PRESET_EXTS.contains(&ext.as_str()) && ext != "pdf" {
             crate::jobs_ui::start_open(self, &display_name(path), Some(path.to_string()), photocraft_engine::jobs::OpenSource::Path(path.to_string()))?;
             return Ok(Vec::new());
         }
@@ -326,6 +331,7 @@ impl PhotocraftApp {
         }
         while self.ui.transform.is_none() {
             let Some(next) = self.drop_places.pop_front() else { return };
+            let Some(next) = self.pdf_place(next) else { continue };
             // A recording takes the command (replayable by path), as before.
             if self.background_jobs && self.session.actions.recording.is_none() {
                 let (name, source) = match next {
@@ -376,6 +382,39 @@ impl PhotocraftApp {
                 Err(e) => self.failed(crate::i18n::fmt(tl!("Couldn't place {name}: {error}"), &[("name", &name), ("error", &e)])),
             }
         }
+    }
+
+    /// A dropped PDF with several pages goes to the Import PDF page picker (its picked pages come
+    /// back to the queue as images); `None` then. Anything else comes back to be placed.
+    fn pdf_place(&mut self, next: DropPlace) -> Option<DropPlace> {
+        let name = match &next {
+            DropPlace::File(f) => dropped_name(f),
+            DropPlace::Bytes(name, _) => name.clone(),
+        };
+        if !name.to_ascii_lowercase().ends_with(".pdf") {
+            return Some(next);
+        }
+        let bytes = match next {
+            DropPlace::Bytes(_, bytes) => bytes,
+            DropPlace::File(f) => {
+                let read = if f.path().is_absolute() {
+                    path_text(f.path(), false).and_then(|p| photocraft_engine::file_cmds::read_file(&p).map_err(|e| e.to_string()))
+                } else {
+                    crate::read_dropped(&*f)
+                };
+                match read {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        self.failed(crate::i18n::fmt(tl!("Couldn't place {name}: {error}"), &[("name", &name), ("error", &e)]));
+                        return None;
+                    }
+                }
+            }
+        };
+        if crate::pdf_pages_ui::intercept(self, &name, &bytes, crate::pdf_pages_ui::Purpose::Place) {
+            return None;
+        }
+        Some(DropPlace::Bytes(name, bytes))
     }
 
     /// Read and decode a dropped file on another thread (the slow part of placing it); the layer is

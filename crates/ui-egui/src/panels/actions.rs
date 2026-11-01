@@ -1237,6 +1237,89 @@ fn action_context_menu(app: &mut PhotocraftApp, response: &egui::Response, index
     });
 }
 
+/// What a folder row asked for this frame (see [`folder_row`]).
+#[derive(Default)]
+struct FolderEffects {
+    toggled: Option<String>,
+    save_set: Option<String>,
+    dropped_in: Option<(Vec<organize::Pick>, Option<String>)>,
+    placed: Option<(Vec<organize::Pick>, Option<String>, Option<String>)>,
+}
+
+/// One folder row of the Actions panel: drawn, clicked, renamed, its menu, and drops on it.
+#[allow(clippy::too_many_arguments)]
+fn folder_row(
+    app: &mut PhotocraftApp,
+    ui: &mut egui::Ui,
+    (path, depth, count): (String, usize, u64),
+    chosen: &[organize::Pick],
+    order: &[organize::Pick],
+    mods: egui::Modifiers,
+    rows: &[Row],
+    folders: &[String],
+    t: &crate::theme::Tokens,
+) -> FolderEffects {
+    let mut fx = FolderEffects::default();
+    let pick = organize::Pick::Folder(path.clone());
+    let collapsed = app.ui.actions.collapsed_sets.contains(&path);
+    let selected = chosen.contains(&pick);
+    let naming = app.ui.actions.folder_rename.as_ref().is_some_and(|r| r.path == path);
+    let carry = if selected { chosen.to_vec() } else { vec![pick.clone()] };
+    let result = draw_set_header(ui, &path, depth, count, collapsed, selected, naming, carry, t);
+    if naming {
+        organize::rename_field(app, ui, &path, result.name_rect);
+    }
+    if result.response.clicked() {
+        if result.response.interact_pointer_pos().is_some_and(|p| result.arrow_rect.contains(p)) {
+            // Only the arrow opens or closes the folder.
+            fx.toggled = Some(path.clone());
+        } else {
+            organize::click(app, pick.clone(), mods, order);
+        }
+    }
+    if result.response.double_clicked() && result.response.interact_pointer_pos().is_some_and(|p| result.name_rect.contains(p)) {
+        organize::start_rename(app, &path);
+    }
+    if result.response.secondary_clicked() && !chosen.contains(&pick) {
+        organize::select_only(app, &pick);
+    }
+    result.response.context_menu(|ui| {
+        organize::item_menu(app, ui, &pick);
+        ui.separator();
+        if ui.button(tl!("Save Set…")).clicked() {
+            fx.save_set = Some(path.clone());
+            ui.close();
+        }
+    });
+    match result.dropped {
+        Some((Dropped::Row(index), _)) => {
+            // A dragged action that's selected brings the rest of the selection.
+            let name = rows.get(index).map(|r| r.name.clone()).unwrap_or_default();
+            let dragged = organize::Pick::Action(name);
+            fx.dropped_in = Some((if chosen.contains(&dragged) { chosen.to_vec() } else { vec![dragged] }, Some(path.clone())));
+        }
+        Some((Dropped::Picks(picks), Zone::Into)) => fx.dropped_in = Some((picks, Some(path.clone()))),
+        Some((Dropped::Picks(picks), zone)) => {
+            // Beside this folder, among its siblings: before it, or before the
+            // next one after it (last when there is none).
+            use photocraft_engine::actions_cmds::folders as f;
+            let parent = f::parent(&path).map(str::to_string);
+            let before = if zone == Zone::Before {
+                Some(path.clone())
+            } else {
+                let siblings: Vec<&String> = folders.iter().filter(|x| f::parent(x) == parent.as_deref()).collect();
+                siblings.iter().position(|x| **x == path).and_then(|i| siblings.get(i + 1)).map(|x| (*x).clone())
+            };
+            fx.placed = Some((picks, parent, before));
+        }
+        None => {}
+    }
+    fx
+}
+
+
+// The row loop draws actions and their steps; folder rows are split out (`folder_row`).
+#[allow(clippy::cognitive_complexity)]
 pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let recording = app.session.actions.recording;
@@ -1309,59 +1392,18 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         for entry in tree {
             let (i, depth) = match entry {
                 Entry::Folder { path, depth, count } => {
-                    let pick = organize::Pick::Folder(path.clone());
-                    let collapsed = app.ui.actions.collapsed_sets.contains(&path);
-                    let selected = chosen.contains(&pick);
-                    let naming = app.ui.actions.folder_rename.as_ref().is_some_and(|r| r.path == path);
-                    let carry = if selected { chosen.clone() } else { vec![pick.clone()] };
-                    let result = draw_set_header(ui, &path, depth, count, collapsed, selected, naming, carry, &t);
-                    if naming {
-                        organize::rename_field(app, ui, &path, result.name_rect);
+                    let fx = folder_row(app, ui, (path, depth, count), &chosen, &order, mods, &rows, &folders, &t);
+                    if fx.toggled.is_some() {
+                        set_toggled = fx.toggled;
                     }
-                    if result.response.clicked() {
-                        if result.response.interact_pointer_pos().is_some_and(|p| result.arrow_rect.contains(p)) {
-                            // Only the arrow opens or closes the folder.
-                            set_toggled = Some(path.clone());
-                        } else {
-                            organize::click(app, pick.clone(), mods, &order);
-                        }
+                    if fx.save_set.is_some() {
+                        save_set = fx.save_set;
                     }
-                    if result.response.double_clicked() && result.response.interact_pointer_pos().is_some_and(|p| result.name_rect.contains(p)) {
-                        organize::start_rename(app, &path);
+                    if fx.dropped_in.is_some() {
+                        dropped_in = fx.dropped_in;
                     }
-                    if result.response.secondary_clicked() && !chosen.contains(&pick) {
-                        organize::select_only(app, &pick);
-                    }
-                    result.response.context_menu(|ui| {
-                        organize::item_menu(app, ui, &pick);
-                        ui.separator();
-                        if ui.button(tl!("Save Set…")).clicked() {
-                            save_set = Some(path.clone());
-                            ui.close();
-                        }
-                    });
-                    match result.dropped {
-                        Some((Dropped::Row(index), _)) => {
-                            // A dragged action that's selected brings the rest of the selection.
-                            let name = rows.get(index).map(|r| r.name.clone()).unwrap_or_default();
-                            let dragged = organize::Pick::Action(name);
-                            dropped_in = Some((if chosen.contains(&dragged) { chosen.clone() } else { vec![dragged] }, Some(path.clone())));
-                        }
-                        Some((Dropped::Picks(picks), Zone::Into)) => dropped_in = Some((picks, Some(path.clone()))),
-                        Some((Dropped::Picks(picks), zone)) => {
-                            // Beside this folder, among its siblings: before it, or before the
-                            // next one after it (last when there is none).
-                            use photocraft_engine::actions_cmds::folders as f;
-                            let parent = f::parent(&path).map(str::to_string);
-                            let before = if zone == Zone::Before {
-                                Some(path.clone())
-                            } else {
-                                let siblings: Vec<&String> = folders.iter().filter(|x| f::parent(x) == parent.as_deref()).collect();
-                                siblings.iter().position(|x| **x == path).and_then(|i| siblings.get(i + 1)).map(|x| (*x).clone())
-                            };
-                            placed = Some((picks, parent, before));
-                        }
-                        None => {}
+                    if fx.placed.is_some() {
+                        placed = fx.placed;
                     }
                     continue;
                 }

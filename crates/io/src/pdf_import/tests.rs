@@ -81,3 +81,59 @@ fn open_reaches_the_pdf_importer_by_magic_and_by_extension() {
     let r = crate::import_with_options("renamed.bin", &bytes, &Default::default()).unwrap();
     assert_eq!(r.document.size.width, 300);
 }
+
+#[test]
+fn pages_are_counted_drawn_small_and_opened_by_index() {
+    let bytes = pdf(400, 200, 3);
+    assert_eq!(page_count(&bytes).unwrap(), 3);
+    let mut seen = Vec::new();
+    thumbnails(&bytes, "", 100, |i, t| {
+        assert_eq!((t.width, t.height), (100, 50));
+        assert_eq!(t.rgba.len(), 100 * 50 * 4);
+        seen.push(i);
+        true
+    })
+    .unwrap();
+    assert_eq!(seen, [0, 1, 2]);
+    // Stopping early.
+    let mut n = 0;
+    thumbnails(&bytes, "", 50, |_, _| {
+        n += 1;
+        false
+    })
+    .unwrap();
+    assert_eq!(n, 1);
+    let r = import_page("p.pdf", &bytes, "", 2, &photocraft_raster::Interrupt::NONE).unwrap();
+    assert_eq!(r.document.size.width, 1667);
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    assert!(import_page("p.pdf", &bytes, "", 3, &photocraft_raster::Interrupt::NONE).is_err());
+    assert!(import_page("p.pdf", &bytes, "", usize::MAX, &photocraft_raster::Interrupt::NONE).is_err());
+    assert!(page_count(b"not a pdf").is_err());
+}
+
+#[test]
+fn a_password_protected_pdf_opens_with_its_password() {
+    for pages in [1, 3] {
+        let locked = photocraft_testkit::pdf::pdf(200, 100, pages, Some("secret"));
+        let bytes = &locked[..];
+        assert!(is_pdf(bytes));
+        assert!(matches!(check(bytes, ""), Err(PdfError::Password)), "no password");
+        assert!(matches!(check(bytes, "wrong"), Err(PdfError::Password)), "a wrong one");
+        assert_eq!(check(bytes, "secret").unwrap(), pages);
+        let mut n = 0;
+        thumbnails(bytes, "secret", 64, |_, _| {
+            n += 1;
+            true
+        })
+        .unwrap();
+        assert_eq!(n, pages);
+        let r = import_page("locked.pdf", bytes, "secret", pages - 1, &photocraft_raster::Interrupt::NONE).unwrap();
+        // The red square is drawn: the content stream was decrypted.
+        let red = r.document.layers[0].surface().unwrap().pixel(125, 290);
+        assert!(red[0] > 0.99 && red[1] < 0.01, "{red:?}");
+        assert_eq!((r.document.size.width, r.document.size.height), (833, 417));
+        // Opened without it (File › Open from an agent): a clear error, not a crash.
+        let e = crate::import_with_options("locked.pdf", bytes, &Default::default()).err().unwrap().to_string();
+        assert!(e.contains("password"), "{e}");
+    }
+}

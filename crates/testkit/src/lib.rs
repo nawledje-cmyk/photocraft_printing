@@ -3,6 +3,7 @@
 
 pub mod gpu;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod pdf;
 pub mod perf;
 pub mod sweep;
 

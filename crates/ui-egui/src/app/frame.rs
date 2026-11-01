@@ -310,6 +310,7 @@ impl PhotocraftApp {
         layers_panel_ui::show_dialog(self, &ctx);
         rasterize_prompt::run_pending(self, &ctx);
         jobs_ui::dialog(self, &ctx);
+        crate::pdf_pages_ui::show(self, &ctx);
         crate::action_notice::draw(self, &ctx);
         discard_ui::show(self, &ctx);
         tiff_options_ui::show(self, &ctx);

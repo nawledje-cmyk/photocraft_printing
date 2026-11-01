@@ -62,6 +62,7 @@ impl PhotocraftApp {
             menu_cache: None,
             move_preview: None,
             action_notice: None,
+            pdf_pages: Default::default(),
             move_hover: None,
             move_distance: None,
             object_finder: None,

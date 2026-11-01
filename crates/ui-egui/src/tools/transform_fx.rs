@@ -124,15 +124,16 @@ impl Backdrop {
     /// The backdrop over `rect` of work pixels (document pixels times `scale`).
     fn region(&self, rect: Rect, scale: f64) -> Buffer {
         let mut out = Buffer::transparent(rect);
-        let w = rect.width().max(0) as usize;
+        let w = rect.width() as usize;
         let k = self.scale / scale.max(1e-9);
         for (i, o) in out.px.iter_mut().enumerate() {
             let (x, y) = (f64::from(rect.x0) + (i % w.max(1)) as f64 + 0.5, f64::from(rect.y0) + (i / w.max(1)) as f64 + 0.5);
             let (bx, by) = ((x * k) as usize, (y * k) as usize);
-            if bx < self.width && by < self.height {
-                if let Some(p) = self.px.get(by * self.width + bx) {
-                    *o = *p;
-                }
+            if bx < self.width
+                && by < self.height
+                && let Some(p) = self.px.get(by * self.width + bx)
+            {
+                *o = *p;
             }
         }
         out

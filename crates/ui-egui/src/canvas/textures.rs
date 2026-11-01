@@ -448,6 +448,8 @@ pub(crate) fn effect_reach(layers: &[photocraft_doc::Layer]) -> i32 {
 /// GPU path: make sure document `idx` is current in the GPU canvas. Edits draw their damage;
 /// unchanged lower-stack composites can be reused by the compositor inside that region.
 /// Returns false if there is no GPU canvas.
+// One redraw decision per frame: full, rect, banded or none, with the compositor's state.
+#[allow(clippy::cognitive_complexity)]
 pub(super) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usize, visible: DRect) -> bool {
     let Some(gpu) = app.gpu.clone() else { return false };
     let Some((revision, last_damage, id)) = app
@@ -550,7 +552,7 @@ pub(super) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
             while px < BAND_PX
                 && let Some(r) = (!b.bands.is_empty()).then(|| b.bands.remove(0))
             {
-                px += r.width().max(0) as u64 * r.height().max(0) as u64;
+                px += u64::from(r.width()) * u64::from(r.height());
                 next.push(r);
             }
             if b.bands.is_empty() {
@@ -755,7 +757,7 @@ const BAND_PX: u64 = 1_200_000;
 const BAND_TRIGGER_PX: u64 = 2_000_000;
 
 fn area(r: DRect) -> u64 {
-    r.width().max(0) as u64 * r.height().max(0) as u64
+    u64::from(r.width()) * u64::from(r.height())
 }
 
 /// The plain document (or its Duotone display), not a preview.
