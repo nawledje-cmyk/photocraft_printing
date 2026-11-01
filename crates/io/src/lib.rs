@@ -60,6 +60,7 @@ pub use ora::losses as ora_losses;
 pub mod pattern_map;
 mod pcraft_cache;
 pub mod pdf;
+pub mod pdf_import;
 mod pdn;
 pub use pcraft_cache::PcraftExportCache;
 pub mod pixels;
@@ -490,6 +491,9 @@ fn import_stages(name: &str, bytes: &[u8], ctl: &photocraft_raster::Interrupt, o
     }
     if raw::is_raw(bytes) {
         return raw::import_raw_demosaic(name, bytes, opts.demosaic);
+    }
+    if pdf_import::is_pdf(bytes) || (has_extension(name, "pdf") && photocraft_codecs::detect(bytes).is_none()) {
+        return pdf_import::import(name, bytes, ctl);
     }
     if is_svg_input(name, bytes) {
         return svg::import_svg_with_group_depth(name, bytes, opts.max_group_depth);

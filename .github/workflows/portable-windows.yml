@@ -103,8 +103,9 @@ jobs:
           PHOTOCRAFT_REQUIRE_GPU_TESTS: "1"
           CARGO_PROFILE_DEV_DEBUG: "0"
 
+      # `heif`: open HEIC/HEIF photos (pure-Rust decoder), as official builds do.
       - name: Build
-        run: cargo build --release --locked -p photocraft
+        run: cargo build --release --locked -p photocraft --features heif
         shell: bash
 
       - name: Package
