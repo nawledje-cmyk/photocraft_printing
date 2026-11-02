@@ -61,6 +61,8 @@ pub mod pattern_map;
 mod pcraft_cache;
 pub mod pdf;
 pub mod pdf_import;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod office;
 mod pdn;
 pub use pcraft_cache::PcraftExportCache;
 pub mod pixels;
@@ -491,6 +493,14 @@ fn import_stages(name: &str, bytes: &[u8], ctl: &photocraft_raster::Interrupt, o
     }
     if raw::is_raw(bytes) {
         return raw::import_raw_demosaic(name, bytes, opts.demosaic);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if photocraft_codecs::detect(bytes).is_none() && office::kind(name, bytes).is_some() {
+        let (pdf, mut warnings) = office::to_pdf(name, bytes)?;
+        let mut r = pdf_import::import(name, &pdf, ctl)?;
+        warnings.append(&mut r.warnings);
+        r.warnings = warnings;
+        return Ok(r);
     }
     if pdf_import::is_pdf(bytes) || (has_extension(name, "pdf") && photocraft_codecs::detect(bytes).is_none()) {
         return pdf_import::import(name, bytes, ctl);

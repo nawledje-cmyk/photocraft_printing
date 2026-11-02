@@ -45,6 +45,9 @@ hayro = { version = "0.8", default-features = false, features = ["embed-fonts", 
 # SVG import (svg.rs): usvg parses, resvg rasterises what the shape model can't hold. Both are
 # already in the tree through the UI's icon loader; text shaping needs the fonts feature set.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Word, Excel and PowerPoint files open as PDF pages (office.rs): office2pdf lays them out in
+# pure Rust (Apache-2.0). Desktop only: it is large, and the browser build doesn't need it.
+office2pdf = "0.10"
 resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts", "raster-images"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

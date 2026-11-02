@@ -158,7 +158,7 @@ impl PhotocraftApp {
         // would block the window). Preset files (brushes, gradients) go the usual way.
         let ext = std::path::Path::new(path).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
         // A PDF is read here to count its pages (several show the Import PDF page picker).
-        if self.background_jobs && !crate::preset_files_ui::PRESET_EXTS.contains(&ext.as_str()) && ext != "pdf" {
+        if self.background_jobs && !crate::preset_files_ui::PRESET_EXTS.contains(&ext.as_str()) && !crate::pdf_pages_ui::takes_name(path) {
             crate::jobs_ui::start_open(self, &display_name(path), Some(path.to_string()), photocraft_engine::jobs::OpenSource::Path(path.to_string()))?;
             return Ok(Vec::new());
         }
@@ -384,14 +384,14 @@ impl PhotocraftApp {
         }
     }
 
-    /// A dropped PDF with several pages goes to the Import PDF page picker (its picked pages come
+    /// A dropped PDF with several pages (or a Word, Excel or PowerPoint file) goes to the Import PDF page picker (its picked pages come
     /// back to the queue as images); `None` then. Anything else comes back to be placed.
     fn pdf_place(&mut self, next: DropPlace) -> Option<DropPlace> {
         let name = match &next {
             DropPlace::File(f) => dropped_name(f),
             DropPlace::Bytes(name, _) => name.clone(),
         };
-        if !name.to_ascii_lowercase().ends_with(".pdf") {
+        if !crate::pdf_pages_ui::takes_name(&name) {
             return Some(next);
         }
         let bytes = match next {

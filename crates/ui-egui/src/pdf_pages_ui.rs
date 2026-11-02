@@ -2,7 +2,8 @@
 //! picks open as documents (or, dropped on a canvas, are placed one after another), as
 //! Photoshop's Import PDF dialog does. Thumbnails and pages are drawn on worker threads, so the
 //! window keeps drawing; a one-page PDF opens straight away. A password-protected PDF first asks
-//! for its password in the same window.
+//! for its password in the same window. Word, Excel and PowerPoint files go the same way, after
+//! they're laid out as a PDF on a worker (`photocraft_io::office`).
 
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
@@ -53,6 +54,8 @@ pub(crate) struct Picker {
     selected: BTreeSet<usize>,
     anchor: usize,
     loading: Option<Loading>,
+    /// An Office file being laid out as a PDF (`bytes` is the Office file until it lands).
+    converting: Option<Receiver<Result<Vec<u8>, String>>>,
     /// Stops the workers (the window closed, or Cancel while loading).
     stop: Arc<AtomicBool>,
 }
@@ -63,8 +66,17 @@ impl Drop for Picker {
     }
 }
 
-/// A PDF waiting for the window: name, contents, purpose, pages (0 when locked), locked.
-type Waiting = (String, Arc<Vec<u8>>, Purpose, usize, bool);
+/// A file waiting for the window.
+struct Waiting {
+    name: String,
+    bytes: Arc<Vec<u8>>,
+    purpose: Purpose,
+    /// 0 when not known yet (locked, or an Office file not laid out yet).
+    pages: usize,
+    locked: bool,
+    /// A Word, Excel or PowerPoint file, laid out as a PDF first.
+    office: bool,
+}
 
 /// PDFs waiting for the window (one shows at a time).
 #[derive(Default)]
@@ -95,15 +107,41 @@ pub(crate) fn intercept(app: &mut PhotocraftApp, name: &str, bytes: &[u8], purpo
     if app.automation_input {
         return false;
     }
+    let waiting = |pages, locked, office| Waiting { name: name.to_string(), bytes: Arc::new(bytes.to_vec()), purpose, pages, locked, office };
+    if is_office(name, bytes) {
+        app.pdf_pages.queue.push_back(waiting(0, false, true));
+        return true;
+    }
     let Some((pages, locked)) = needs_window(bytes) else { return false };
-    app.pdf_pages.queue.push_back((name.to_string(), Arc::new(bytes.to_vec()), purpose, pages, locked));
+    app.pdf_pages.queue.push_back(waiting(pages, locked, false));
     true
 }
 
-/// The file's name without `.pdf`.
+/// A Word, Excel or PowerPoint file (desktop only).
+fn is_office(name: &str, bytes: &[u8]) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        photocraft_codecs::detect(bytes).is_none() && photocraft_io::office::kind(name, bytes).is_some()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (name, bytes);
+        false
+    }
+}
+
+/// Whether a file called `name` is one this window opens: a PDF, or (desktop) an Office file.
+pub(crate) fn takes_name(name: &str) -> bool {
+    let ext = name.rsplit('.').next().unwrap_or_default().to_ascii_lowercase();
+    name.contains('.') && (ext == "pdf" || (cfg!(not(target_arch = "wasm32")) && ["docx", "xlsx", "pptx"].contains(&ext.as_str())))
+}
+
+/// The file's name without its `.pdf`, `.docx`, `.xlsx` or `.pptx`.
 fn stem(name: &str) -> &str {
-    let lower = name.to_ascii_lowercase();
-    if lower.ends_with(".pdf") { name.get(..name.len() - 4).unwrap_or(name) } else { name }
+    match name.rsplit_once('.') {
+        Some((stem, _)) if takes_name(name) && !stem.is_empty() => stem,
+        _ => name,
+    }
 }
 
 /// The name page `index` opens or is placed under: "Report - Page 3".
@@ -124,7 +162,8 @@ fn spawn(name: &str, work: impl FnOnce() + Send + 'static) -> bool {
     }
 }
 
-fn start(ctx: &egui::Context, name: String, bytes: Arc<Vec<u8>>, purpose: Purpose, pages: usize, locked: bool) -> Picker {
+fn start(ctx: &egui::Context, w: Waiting) -> Picker {
+    let Waiting { name, bytes, purpose, pages, locked, office } = w;
     let mut p = Picker {
         name,
         bytes,
@@ -139,12 +178,63 @@ fn start(ctx: &egui::Context, name: String, bytes: Arc<Vec<u8>>, purpose: Purpos
         selected: BTreeSet::from([0]),
         anchor: 0,
         loading: None,
+        converting: None,
         stop: Arc::new(AtomicBool::new(false)),
     };
-    if !locked {
+    if office {
+        convert(ctx, &mut p);
+    } else if !locked {
         thumbnails(ctx, &mut p);
     }
     p
+}
+
+/// Lay the Office file out as a PDF on a worker.
+fn convert(ctx: &egui::Context, p: &mut Picker) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (bytes, name, repaint) = (p.bytes.clone(), p.name.clone(), ctx.clone());
+    let started = spawn("office-to-pdf", move || {
+        #[cfg(not(target_arch = "wasm32"))]
+        let r = photocraft_io::office::to_pdf(&name, &bytes).map(|(pdf, _)| pdf).map_err(|e| e.to_string());
+        #[cfg(target_arch = "wasm32")]
+        let r = {
+            let _ = (&name, &bytes);
+            Err("Office files open in the desktop app".to_string())
+        };
+        let _ = tx.send(r);
+        repaint.request_repaint();
+    });
+    if started {
+        p.converting = Some(rx);
+    }
+}
+
+/// The laid-out PDF of an Office file landed: its pages show (one opens at once). False when the
+/// file can't be opened (reported).
+fn converted(app: &mut PhotocraftApp, ctx: &egui::Context, p: &mut Picker, r: Result<Vec<u8>, String>) -> bool {
+    use photocraft_io::pdf_import::check;
+    let pages = r.and_then(|pdf| {
+        let n = check(&pdf, "").map_err(|e| photocraft_io::IoError::from(e).to_string())?;
+        p.bytes = Arc::new(pdf);
+        Ok(n)
+    });
+    match pages {
+        Ok(n) => {
+            p.pages = n;
+            p.thumbs = vec![None; n];
+            p.selected = BTreeSet::from([0]);
+            if n == 1 {
+                load(ctx, p);
+            } else {
+                thumbnails(ctx, p);
+            }
+            true
+        }
+        Err(e) => {
+            app.open_failed(&p.name, &e);
+            false
+        }
+    }
 }
 
 /// Draw every page small on a worker, for the grid.
@@ -256,11 +346,25 @@ fn arrived(app: &mut PhotocraftApp, name: &str, purpose: Purpose, index: usize, 
 /// Per frame: the next PDF's window, its thumbnails and loaded pages, and the window itself.
 pub(crate) fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
     if app.pdf_pages.picker.is_none()
-        && let Some((name, bytes, purpose, pages, locked)) = app.pdf_pages.queue.pop_front()
+        && let Some(w) = app.pdf_pages.queue.pop_front()
     {
-        app.pdf_pages.picker = Some(start(ctx, name, bytes, purpose, pages, locked));
+        app.pdf_pages.picker = Some(start(ctx, w));
     }
     let Some(mut p) = app.pdf_pages.picker.take() else { return };
+    // An Office file laid out.
+    if let Some(rx) = p.converting.as_ref() {
+        let r = match rx.try_recv() {
+            Ok(r) => Some(r),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => Some(Err("the converter stopped".to_string())),
+        };
+        if let Some(r) = r {
+            p.converting = None;
+            if !converted(app, ctx, &mut p, r) {
+                return;
+            }
+        }
+    }
     // Thumbnails as they're drawn.
     if let Some(rx) = p.thumb_rx.as_ref() {
         loop {
@@ -329,6 +433,17 @@ fn window(app: &mut PhotocraftApp, ctx: &egui::Context, p: &mut Picker) -> bool 
         ui.separator();
         if p.locked {
             password_box(ui, p, &t, &mut answer);
+            return;
+        }
+        if p.converting.is_some() {
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new());
+                ui.label(tl!("Laying out the document's pages…"));
+            });
+            ui.add_space(6.0);
+            if ui.button(tl!("Cancel")).clicked() {
+                answer = Answer::Close;
+            }
             return;
         }
         if let Some(loading) = p.loading.as_ref() {

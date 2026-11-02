@@ -140,7 +140,7 @@ fn dropped_on_a_canvas_the_picked_pages_are_placed_one_after_another() {
 #[test]
 fn clicks_pick_one_add_and_range() {
     let ctx = egui::Context::default();
-    let mut p = start(&ctx, "x.pdf".into(), Arc::new(pdf(50, 50, 6)), Purpose::Open, 6, false);
+    let mut p = start(&ctx, Waiting { name: "x.pdf".into(), bytes: Arc::new(pdf(50, 50, 6)), purpose: Purpose::Open, pages: 6, locked: false, office: false });
     click(&mut p, 2, egui::Modifiers::NONE);
     assert_eq!(p.selected, BTreeSet::from([2]));
     click(&mut p, 4, egui::Modifiers::COMMAND);
@@ -213,4 +213,32 @@ fn a_locked_single_page_opens_once_unlocked() {
     assert!(unlock(&mut app, &ctx, &mut p));
     assert_eq!(p.pages, 2);
     assert!(p.loading.is_none() && p.thumb_rx.is_some(), "two pages: the grid");
+}
+
+/// A two-page Word document, minimal.
+fn docx() -> Vec<u8> {
+    let mut z = photocraft_format::zip::ZipWriter::new();
+    z.add("[Content_Types].xml", br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#).unwrap();
+    z.add("_rels/.rels", br#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#).unwrap();
+    z.add("word/document.xml", br#"<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>One</w:t></w:r></w:p><w:p><w:r><w:br w:type="page"/></w:r></w:p><w:p><w:r><w:t>Two</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>"#).unwrap();
+    z.finish().unwrap()
+}
+
+/// A Word document is laid out on a worker, then shows its pages like a PDF; the picked ones open.
+#[test]
+fn a_word_document_shows_its_pages_and_opens_the_picked_ones() {
+    let mut app = app();
+    let ctx = egui::Context::default();
+    app.open_bytes("Letter.docx", &docx()).unwrap();
+    assert!(app.session.documents().is_empty());
+    frame(&mut app, &ctx);
+    assert!(app.pdf_pages.picker.as_ref().is_some_and(|p| p.converting.is_some()), "laid out on a worker");
+    until(&mut app, &ctx, |a| a.pdf_pages.picker.as_ref().is_some_and(|p| p.pages == 2 && p.thumbs.iter().all(Option::is_some)));
+    let p = app.pdf_pages.picker.as_mut().expect("the pages show");
+    assert_eq!(p.pages, 2);
+    p.selected = (0..2).collect();
+    load(&ctx, p);
+    until(&mut app, &ctx, |a| a.pdf_pages.picker.is_none());
+    assert_eq!(names(&app), ["Letter - Page 1", "Letter - Page 2"]);
+    assert!(takes_name("Book.XLSX") && takes_name("deck.pptx") && !takes_name("photo.png") && !takes_name("docx"));
 }
