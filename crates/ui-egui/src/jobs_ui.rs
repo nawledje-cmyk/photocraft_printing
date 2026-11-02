@@ -449,6 +449,14 @@ pub fn cancel(app: &mut PhotocraftApp, id: JobId) -> bool {
 }
 
 fn on_event(app: &mut PhotocraftApp, ctx: &egui::Context, e: JobEvent) {
+    // Help › Performance Logging: how long each background job took (a Free Transform's apply,
+    // a filter, a save), start to applied.
+    if crate::frame_stages::logging()
+        && let Some(j) = app.session.jobs_with_recent().into_iter().find(|j| j.id == e.id)
+        && j.elapsed_ms >= 50.0
+    {
+        log::info!("job: {} {} in {:.0} ms ({})", j.label, j.state, j.elapsed_ms, e.command);
+    }
     // Preferences ▸ General ▸ Beep When Done (off by default): a finished operation beeps, like
     // Photoshop's cue. Cancelling is the user's own action and stays silent.
     if matches!(e.outcome, JobOutcome::Done(_))
