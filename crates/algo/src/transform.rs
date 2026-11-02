@@ -440,7 +440,25 @@ fn warp(
         // Samples past the source rect repeat its edge, so a stretched edge row or column keeps its
         // colour and opacity (the "pixel stretch", #3773); the outline is antialiased by coverage
         // instead. `foot_u`/`foot_v` are a destination pixel's extent in source pixels.
-        let clamped = |x: i32, y: i32, c: usize| at(x.clamp(src_rect.x0, src_rect.x1 - 1), y.clamp(src_rect.y0, src_rect.y1 - 1), c);
+        let (cx0, cx1, cy0, cy1) = (src_rect.x0, src_rect.x1 - 1, src_rect.y0, src_rect.y1 - 1);
+        // The window offsets (in pixels) of `N` taps from `first`, each clamped to the source rect
+        // (the edge repeats) and `None` outside the window (reads as 0), as `at` reads them.
+        fn taps<const N: usize>(first: i32, lo: i32, hi: i32, w0: i32, w1: i32, stride: usize) -> [Option<usize>; N] {
+            std::array::from_fn(|i| {
+                let p = first.saturating_add(i as i32).clamp(lo, hi);
+                (p >= w0 && p < w1).then(|| (p - w0) as usize * stride)
+            })
+        }
+        // Adds the pixel at window offset `row + col`, weighted by `k1` then `k2`, to `acc`.
+        let add = |acc: &mut [f64; 8], row: Option<usize>, col: Option<usize>, k1: f64, k2: f64| {
+            let (Some(row), Some(col)) = (row, col) else { return };
+            let base = (row + col) * n;
+            if let Some(p) = px.get(base..base + n) {
+                for (s, v) in acc.iter_mut().zip(p) {
+                    *s += f64::from(*v) * k1 * k2;
+                }
+            }
+        };
         let (mx, my) = ((t.x0 + t.x1) as f64 / 2.0, (t.y0 + t.y1) as f64 / 2.0);
         let (o, dx, dy) = (inv.apply(mx, my), inv.apply(mx + 1.0, my), inv.apply(mx, my + 1.0));
         let extent = |e: f64| if e.is_finite() && e > 1e-12 { e } else { 1.0 };
@@ -475,23 +493,22 @@ fn warp(
                     Interp::Bilinear => {
                         let (ix, iy) = (u.floor() as i32, v.floor() as i32);
                         let (fx, fy) = (u - ix as f64, v - iy as f64);
-                        for (dy, wy) in [(0, 1.0 - fy), (1, fy)] {
-                            for (dx, wx) in [(0, 1.0 - fx), (1, fx)] {
-                                for (c, s) in acc.iter_mut().enumerate().take(n) {
-                                    *s += clamped(ix + dx, iy + dy, c) * wx * wy;
-                                }
+                        let (cols, rows) = (taps::<2>(ix, cx0, cx1, foot.x0, foot.x1, 1), taps::<2>(iy, cy0, cy1, foot.y0, foot.y1, fw));
+                        for (row, wy) in rows.iter().zip([1.0 - fy, fy]) {
+                            for (col, wx) in cols.iter().zip([1.0 - fx, fx]) {
+                                add(&mut acc, *row, *col, wx, wy);
                             }
                         }
                     }
                     Interp::Bicubic => {
                         let (ix, iy) = (u.floor() as i32, v.floor() as i32);
                         let (wx, wy) = (bicubic(u - ix as f64), bicubic(v - iy as f64));
-                        for (j, wyj) in wy.iter().enumerate() {
-                            for (i, wxi) in wx.iter().enumerate() {
-                                let k = wxi * wyj;
-                                for (c, s) in acc.iter_mut().enumerate().take(n) {
-                                    *s += clamped(ix - 1 + i as i32, iy - 1 + j as i32, c) * k;
-                                }
+                        // The 4 × 4 taps' offsets in the window, found once per pixel instead of per
+                        // tap and channel (the same samples and sums as `clamped`).
+                        let (cols, rows) = (taps::<4>(ix - 1, cx0, cx1, foot.x0, foot.x1, 1), taps::<4>(iy - 1, cy0, cy1, foot.y0, foot.y1, fw));
+                        for (row, wyj) in rows.iter().zip(wy) {
+                            for (col, wxi) in cols.iter().zip(wx) {
+                                add(&mut acc, *row, *col, wxi * wyj, 1.0);
                             }
                         }
                     }

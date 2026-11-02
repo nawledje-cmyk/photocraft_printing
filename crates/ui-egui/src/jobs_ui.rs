@@ -708,6 +708,11 @@ pub fn save_progress(app: &PhotocraftApp, doc: DocId) -> Option<String> {
 /// (the file name on hover). Draws nothing when no job runs.
 pub fn status_progress(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let Some(j) = job_in_view(app) else { return };
+    // Applying a Free Transform shows its result already (the preview stays until it lands): no
+    // "Free Transform" readout for the moment it takes.
+    if crate::transform_tool::committing(app) == Some(j.id) {
+        return;
+    }
     let saving = app.jobs.saves.iter().any(|s| s.job == j.id);
     let t = Tokens::get(ui.ctx());
     let (bar_w, bar_h) = if t.pro { (120.0, 6.0) } else { (140.0, 6.0) };
