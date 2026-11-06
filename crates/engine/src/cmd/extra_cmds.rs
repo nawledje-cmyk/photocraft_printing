@@ -169,14 +169,37 @@ fn stroke(s: &mut Session, p: &Value) -> Result<Value> {
     let id = layer_param(s, p)?;
     s.edit("Stroke", |doc, _| {
         let canvas = doc.bounds();
+        // Only the selection's (or layer's) content and `width` + 2 px around it can be stroked:
+        // work there, not on the whole canvas (a small frame on a 300 ppi page took 0.2 s). Past
+        // that area everything is unselected, as past the canvas, so the stroke is the same.
+        let source = match &doc.selection {
+            Some(m) => m,
+            None => doc
+                .layer(id)
+                .ok_or(EngineError::NoLayer(id))?
+                .surface()
+                .ok_or_else(|| EngineError::Other("not a pixel layer".into()))?,
+        };
+        let margin = i32::try_from(width).unwrap_or(i32::MAX).saturating_add(2);
+        let b = source.content_bounds();
+        // A selection whose untiled pixels are selected (an inverted one), or a layer without
+        // transparency or with opaque untiled pixels, reaches everywhere.
+        let fmt = source.format();
+        let everywhere = (doc.selection.is_none() && !fmt.alpha) || source.default_pixel().last().is_some_and(|a| *a > 0.0);
+        let canvas = if everywhere {
+            canvas
+        } else {
+            Rect::new(b.x0.saturating_sub(margin), b.y0.saturating_sub(margin), b.x1.saturating_add(margin), b.y1.saturating_add(margin)).intersect(&canvas)
+        };
+        if canvas.is_empty() {
+            return Ok(());
+        }
         let (w, h) = (canvas.width() as usize, canvas.height() as usize);
         let edge = match &doc.selection {
             Some(m) => sel::mask_from_surface(Some(m), canvas),
             None => {
-                let l = doc.layer(id).ok_or(EngineError::NoLayer(id))?;
-                let surf = l.surface().ok_or_else(|| EngineError::Other("not a pixel layer".into()))?;
                 let mut px = vec![[0.0f32; 4]; w * h];
-                surf.read_rgba_into(canvas, &mut px);
+                source.read_rgba_into(canvas, &mut px);
                 px.iter().map(|p| p[3]).collect()
             }
         };

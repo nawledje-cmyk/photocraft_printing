@@ -157,6 +157,15 @@ impl Interp {
 /// Photoshop's Bicubic: the Keys cubic at a = −0.75 (Catmull-Rom is −0.5), the weights of the
 /// four source pixels around a sample `t` (0..1) past the second. Measured on Photoshop 27.11's
 /// Free Transform: a 200 % step edge matches within 0.5 levels; Catmull-Rom was 6 off.
+/// `v.floor() as i32` without the call to `floor` (the baseline x86-64 target has no rounding
+/// instruction, so it was a library call per sample): the same value for every input, NaN and
+/// out-of-range ones included (the cast saturates).
+#[inline]
+fn floor_i32(v: f64) -> i32 {
+    let i = v as i32;
+    if f64::from(i) > v { i.saturating_sub(1) } else { i }
+}
+
 pub(crate) fn bicubic(t: f64) -> [f64; 4] {
     const A: f64 = -0.75;
     let near = |x: f64| (A + 2.0) * x * x * x - (A + 3.0) * x * x + 1.0;
@@ -441,6 +450,9 @@ fn warp(
         // colour and opacity (the "pixel stretch", #3773); the outline is antialiased by coverage
         // instead. `foot_u`/`foot_v` are a destination pixel's extent in source pixels.
         let (cx0, cx1, cy0, cy1) = (src_rect.x0, src_rect.x1 - 1, src_rect.y0, src_rect.y1 - 1);
+        // Where a tap is read as is (no edge repeat, inside the window): inclusive bounds.
+        let (lo_x, hi_x) = (cx0.max(foot.x0), cx1.min(foot.x1 - 1));
+        let (lo_y, hi_y) = (cy0.max(foot.y0), cy1.min(foot.y1 - 1));
         // The window offsets (in pixels) of `N` taps from `first`, each clamped to the source rect
         // (the edge repeats) and `None` outside the window (reads as 0), as `at` reads them.
         fn taps<const N: usize>(first: i32, lo: i32, hi: i32, w0: i32, w1: i32, stride: usize) -> [Option<usize>; N] {
@@ -491,7 +503,7 @@ fn warp(
                         }
                     }
                     Interp::Bilinear => {
-                        let (ix, iy) = (u.floor() as i32, v.floor() as i32);
+                        let (ix, iy) = (floor_i32(u), floor_i32(v));
                         let (fx, fy) = (u - ix as f64, v - iy as f64);
                         let (cols, rows) = (taps::<2>(ix, cx0, cx1, foot.x0, foot.x1, 1), taps::<2>(iy, cy0, cy1, foot.y0, foot.y1, fw));
                         for (row, wy) in rows.iter().zip([1.0 - fy, fy]) {
@@ -501,14 +513,49 @@ fn warp(
                         }
                     }
                     Interp::Bicubic => {
-                        let (ix, iy) = (u.floor() as i32, v.floor() as i32);
-                        let (wx, wy) = (bicubic(u - ix as f64), bicubic(v - iy as f64));
-                        // The 4 × 4 taps' offsets in the window, found once per pixel instead of per
-                        // tap and channel (the same samples and sums as `clamped`).
-                        let (cols, rows) = (taps::<4>(ix - 1, cx0, cx1, foot.x0, foot.x1, 1), taps::<4>(iy - 1, cy0, cy1, foot.y0, foot.y1, fw));
-                        for (row, wyj) in rows.iter().zip(wy) {
-                            for (col, wxi) in cols.iter().zip(wx) {
-                                add(&mut acc, *row, *col, wxi * wyj, 1.0);
+                        let (ix, iy) = (floor_i32(u), floor_i32(v));
+                        let (wx, wy) = (bicubic(u - f64::from(ix)), bicubic(v - f64::from(iy)));
+                        if ix > lo_x && ix.saturating_add(2) <= hi_x && iy > lo_y && iy.saturating_add(2) <= hi_y {
+                            // All 16 taps inside the source and the window (most pixels): read
+                            // the 4 × 4 block directly, in the same order and with the same
+                            // weights as below.
+                            let first = ((iy - 1 - foot.y0) as usize * fw + (ix - 1 - foot.x0) as usize) * n;
+                            let stride = fw * n;
+                            if n == 4 {
+                                // RGBA / CMY+alpha: four fixed lanes the compiler keeps in registers.
+                                let mut a4 = [0.0f64; 4];
+                                for (j, wyj) in wy.iter().enumerate() {
+                                    let start = first + j * stride;
+                                    let Some(block) = px.get(start..start + 16) else { continue };
+                                    for (tap, wxi) in block.chunks_exact(4).zip(wx) {
+                                        let k = wxi * wyj;
+                                        a4[0] += f64::from(tap[0]) * k * 1.0;
+                                        a4[1] += f64::from(tap[1]) * k * 1.0;
+                                        a4[2] += f64::from(tap[2]) * k * 1.0;
+                                        a4[3] += f64::from(tap[3]) * k * 1.0;
+                                    }
+                                }
+                                acc[..4].copy_from_slice(&a4);
+                            } else {
+                                for (j, wyj) in wy.iter().enumerate() {
+                                    let start = first + j * stride;
+                                    let Some(block) = px.get(start..start + 4 * n) else { continue };
+                                    for (tap, wxi) in block.chunks_exact(n).zip(wx) {
+                                        let k = wxi * wyj;
+                                        for (s, v) in acc.iter_mut().zip(tap) {
+                                            *s += f64::from(*v) * k * 1.0;
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            // The 4 × 4 taps' offsets in the window, found once per pixel instead
+                            // of per tap and channel (the same samples and sums as `clamped`).
+                            let (cols, rows) = (taps::<4>(ix - 1, cx0, cx1, foot.x0, foot.x1, 1), taps::<4>(iy - 1, cy0, cy1, foot.y0, foot.y1, fw));
+                            for (row, wyj) in rows.iter().zip(wy) {
+                                for (col, wxi) in cols.iter().zip(wx) {
+                                    add(&mut acc, *row, *col, wxi * wyj, 1.0);
+                                }
                             }
                         }
                     }

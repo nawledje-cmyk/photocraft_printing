@@ -816,3 +816,24 @@ fn rasterize_smart_object_layer() {
     assert!(matches!(active(&s4).content, LayerContent::Raster(_)));
     assert_eq!(pixel(&s4, 30, 30), vec![1.0, 1.0, 0.0, 1.0]);
 }
+
+/// Stroke works only around what's selected (not the whole canvas), and still reaches the canvas
+/// edge for a selection that does: an inverted selection strokes the canvas border and the hole.
+#[test]
+fn stroke_around_a_small_or_inverted_selection_on_a_large_canvas() {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 1200, "height": 900, "background": "white"})).unwrap();
+    s.execute("layer.new.layer", json!({})).unwrap();
+    s.execute("select.rect", json!({"x": 500, "y": 400, "width": 100, "height": 60})).unwrap();
+    s.execute("edit.stroke", json!({"width": 4, "color": "#ff0000", "location": "outside"})).unwrap();
+    let alpha = |s: &Session, x: i32, y: i32| s.active().unwrap().doc.layers.last().unwrap().surface().unwrap().pixel(x, y)[3];
+    assert!(alpha(&s, 497, 430) > 0.99 && alpha(&s, 496, 430) > 0.99, "the band outside the left edge");
+    assert!(alpha(&s, 495, 430) < 0.01 && alpha(&s, 500, 430) < 0.01, "4 px wide, outside only");
+    assert!(alpha(&s, 10, 10) < 0.01);
+    s.execute("edit.undo", json!({})).unwrap();
+    s.execute("select.inverse", json!({})).unwrap();
+    s.execute("edit.stroke", json!({"width": 3, "color": "#ff0000", "location": "inside"})).unwrap();
+    assert!(alpha(&s, 0, 0) > 0.99 && alpha(&s, 1199, 899) > 0.99 && alpha(&s, 2, 450) > 0.99, "the canvas border");
+    assert!(alpha(&s, 3, 450) < 0.01 && alpha(&s, 600, 100) < 0.01);
+    assert!(alpha(&s, 499, 430) > 0.99 && alpha(&s, 497, 430) > 0.99 && alpha(&s, 496, 430) < 0.01, "and around the hole");
+}

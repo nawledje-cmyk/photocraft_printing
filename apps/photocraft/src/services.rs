@@ -500,6 +500,29 @@ fn guarded_clipboard_get(mut read: impl FnMut() -> Result<Option<(u32, u32, Vec<
     Box::new(move || crate::crash_guard::guard("Paste", &mut read))
 }
 
+/// A Copy's image on its way to the OS clipboard on another thread (Windows), with its pixels for
+/// a retry in place should that fail.
+type PendingExport = Rc<RefCell<Option<(std::thread::JoinHandle<Result<(), String>>, (u32, u32, Vec<u8>))>>>;
+
+fn set_clipboard_image(clip: &RefCell<Option<arboard::Clipboard>>, w: u32, h: u32, px: &[u8]) -> Result<(), String> {
+    let mut slot = clip.try_borrow_mut().map_err(|_| "clipboard is busy".to_string())?;
+    let cb = match slot.as_mut() {
+        Some(c) => c,
+        None => slot.insert(arboard::Clipboard::new().map_err(|e| e.to_string())?),
+    };
+    cb.set_image(arboard::ImageData { width: w as usize, height: h as usize, bytes: std::borrow::Cow::Borrowed(px) }).map_err(|e| e.to_string())
+}
+
+/// Waits for a Copy still going to the OS clipboard, so what is read next (or copied next) comes
+/// after it; one that failed there is set again here, and its error returned if that fails too.
+fn finish_export(clip: &RefCell<Option<arboard::Clipboard>>, pending: &PendingExport) -> Result<(), String> {
+    let Some((thread, (w, h, px))) = pending.borrow_mut().take() else { return Ok(()) };
+    match thread.join() {
+        Ok(Ok(())) => Ok(()),
+        _ => set_clipboard_image(clip, w, h, &px),
+    }
+}
+
 fn guarded_clipboard_set(mut write: impl FnMut(u32, u32, &[u8]) -> Result<(), String> + 'static) -> photocraft_ui_egui::ClipboardSetFn {
     Box::new(move |w: u32, h: u32, px: &[u8]| crate::crash_guard::guard("Copy", || write(w, h, px)))
 }
@@ -640,6 +663,7 @@ fn shell_word(s: &str) -> String {
 
 pub fn native(automation: Option<photocraft_automation::AuthorizedWorkspace>) -> Services {
     let clip: Rc<RefCell<Option<arboard::Clipboard>>> = Rc::default();
+    let pending_export: PendingExport = Rc::default();
     let clip_unreadable: Rc<Cell<bool>> = Rc::default();
     let automation_read = automation.clone().map(|workspace| {
         Box::new(move |path: &str| {
@@ -705,19 +729,34 @@ pub fn native(automation: Option<photocraft_automation::AuthorizedWorkspace>) ->
         check_updates: Some(crate::updates::service()),
         clipboard_set_image: Some({
             let clip = clip.clone();
+            let pending = pending_export.clone();
             guarded_clipboard_set(move |w: u32, h: u32, px: &[u8]| {
-                let mut slot = clip.try_borrow_mut().map_err(|_| "clipboard is busy".to_string())?;
-                let cb = match slot.as_mut() {
-                    Some(c) => c,
-                    None => slot.insert(arboard::Clipboard::new().map_err(|e| e.to_string())?),
-                };
-                cb.set_image(arboard::ImageData { width: w as usize, height: h as usize, bytes: std::borrow::Cow::Borrowed(px) }).map_err(|e| e.to_string())
+                // On Windows the image goes to the clipboard on another thread (encoding it there
+                // took 0.1–0.2 s of each Copy on a laptop); a read waits for it first. Elsewhere
+                // (X11, Wayland) the clipboard is served by the instance that set it, so in place.
+                if cfg!(windows) {
+                    finish_export(&clip, &pending)?;
+                    let image = (w, h, px.to_vec());
+                    let bytes = image.2.clone();
+                    let thread = std::thread::Builder::new().name("clipboard-export".into()).spawn(move || {
+                        arboard::Clipboard::new()
+                            .and_then(|mut cb| cb.set_image(arboard::ImageData { width: w as usize, height: h as usize, bytes: std::borrow::Cow::Owned(bytes) }))
+                            .map_err(|e| e.to_string())
+                    });
+                    if let Ok(thread) = thread {
+                        *pending.borrow_mut() = Some((thread, image));
+                        return Ok(());
+                    }
+                }
+                set_clipboard_image(&clip, w, h, px)
             })
         }),
         clipboard_get_image: Some({
             let clip = clip.clone();
             let unreadable = clip_unreadable.clone();
+            let pending = pending_export.clone();
             guarded_clipboard_get(move || {
+                finish_export(&clip, &pending)?;
                 let mut slot = clip.try_borrow_mut().map_err(|_| "clipboard is busy".to_string())?;
                 let cb = match slot.as_mut() {
                     Some(c) => c,

@@ -342,3 +342,61 @@ fn homography_is_identity() {
     assert!(!Homography([1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]).is_identity());
     assert!(!Homography([1.0, 0.1, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]).is_identity());
 }
+
+#[test]
+fn floor_i32_matches_floor_then_cast() {
+    for v in [0.0, -0.0, 0.5, -0.5, 1.0, -1.0, 2.999_999, -2.000_001, 1e9, -1e9, 3e9, -3e9, f64::MAX, f64::MIN, f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 1e-300, -1e-300] {
+        assert_eq!(super::floor_i32(v), v.floor() as i32, "{v}");
+    }
+}
+
+/// The interior fast path reads the same samples as the edge path: a warp of a noisy image is
+/// the same whether its pixels go through one or the other (a rotation mixes both), and stays
+/// exactly the per-tap reference computed here.
+#[test]
+fn bicubic_interior_fast_path_matches_the_reference_sampler() {
+    let (w, h) = (90, 70);
+    let mut src = Surface::new(PixelFormat::RGBA8);
+    let px: Vec<f32> = (0..w * h * 4).map(|i| ((i * 7919) % 256) as f32 / 255.0).collect();
+    src.write_region(Rect::new(0, 0, w, h), &px);
+    let r = src.content_bounds();
+    let a: f64 = 0.3;
+    let hm = Homography([1.3 * a.cos(), -1.3 * a.sin(), 20.0, 1.3 * a.sin(), 1.3 * a.cos(), 5.0, 0.0, 0.0, 1.0]);
+    let out = warp_surface(&src, r, &hm, Interp::Bicubic).unwrap();
+    let inv = hm.inverse().unwrap();
+    // The source premultiplied, as the warp samples it; edges repeat.
+    let at = |x: i32, y: i32, c: usize| -> f64 {
+        let (x, y) = (x.clamp(0, w - 1), y.clamp(0, h - 1));
+        let i = ((y * w + x) * 4) as usize;
+        let v = f64::from(src.pixel(x, y)[c]) * if c < 3 { f64::from(src.pixel(x, y)[3]) } else { 1.0 };
+        let _ = i;
+        v
+    };
+    let mut checked = 0;
+    for (x, y) in [(60, 60), (80, 40), (100, 90), (40, 100), (70, 75)] {
+        let (u, v) = inv.apply(x as f64 + 0.5, y as f64 + 0.5);
+        let (u, v) = (u - 0.5, v - 0.5);
+        if u < 2.0 || v < 2.0 || u > f64::from(w) - 3.0 || v > f64::from(h) - 3.0 {
+            continue;
+        }
+        let (ix, iy) = (u.floor() as i32, v.floor() as i32);
+        let (wx, wy) = (bicubic(u - ix as f64), bicubic(v - iy as f64));
+        let mut acc = [0.0f64; 4];
+        for (j, wyj) in wy.iter().enumerate() {
+            for (i, wxi) in wx.iter().enumerate() {
+                for (c, s) in acc.iter_mut().enumerate() {
+                    *s += at(ix - 1 + i as i32, iy - 1 + j as i32, c) * (wxi * wyj) * 1.0;
+                }
+            }
+        }
+        let got = out.pixel(x, y);
+        let al = acc[3].clamp(0.0, 1.0);
+        for c in 0..3 {
+            let want = (acc[c] / acc[3]).clamp(0.0, 1.0);
+            assert!((f64::from(got[c]) - want).abs() <= 1.0 / 255.0 + 1e-6, "({x}, {y}) channel {c}: {} vs {want}", got[c]);
+        }
+        assert!((f64::from(got[3]) - al).abs() <= 1.0 / 255.0 + 1e-6);
+        checked += 1;
+    }
+    assert!(checked >= 3, "interior pixels checked: {checked}");
+}
