@@ -439,7 +439,7 @@ impl PhotocraftApp {
                     PlaceSource::Path(path) => photocraft_engine::file_cmds::read_file(&path).map_err(|e| e.to_string())?,
                     PlaceSource::Bytes(bytes) => bytes,
                 };
-                let prepared = photocraft_engine::file_cmds::prepare_place(&setup, &thread_name, bytes, None, &serde_json::json!({})).map_err(|e| e.to_string())?;
+                let prepared = photocraft_engine::file_cmds::prepare_place(&setup, &thread_name, bytes, None, &serde_json::json!({"fast": true})).map_err(|e| e.to_string())?;
                 let bounds = prepared.pixels().content_bounds();
                 let (image, uv) = crate::transform_tex::read_surface(prepared.pixels(), None, bounds, max_side);
                 Ok((prepared, (bounds, image, uv)))

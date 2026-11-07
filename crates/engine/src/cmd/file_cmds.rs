@@ -42,7 +42,7 @@ use info::{exposure_text, find_element};
 pub use paths::read_file;
 pub use open::{PLACE_EMBEDDED, PlaceSetup, PreparedPlace, apply_place, open_bytes_as, place_bytes, place_setup, prepare_place, raw_defaults};
 use open::{close_all, close_others, open_as, place, revert};
-pub(crate) use open::{import, tag_exr_colorspace};
+pub(crate) use open::{import, plain_pixels, tag_exr_colorspace};
 use paths::is_file;
 #[cfg(test)]
 use paths::openable_name;

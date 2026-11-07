@@ -232,14 +232,45 @@ pub fn prepare_place(setup: &PlaceSetup, name: &str, bytes: Vec<u8>, linked: Opt
         _ => (cw / 2.0, ch / 2.0),
     };
     let (dx, dy) = ((center.0 - w * scale / 2.0).round(), (center.1 - h * scale / 2.0).round());
-    let mut px = flattened_checked(&src, setup.format, "file.place")?;
+    // A single plain layer (a photo) is its own flattened image: no composite of the whole file.
+    let mut px = match plain_pixels(&src, setup.format) {
+        Some(px) => px,
+        None => flattened_checked(&src, setup.format, "file.place")?,
+    };
     if (scale - 1.0).abs() > 1e-9 {
-        px = resize_surface(&px, scale, scale, Resample::Bicubic);
+        // `fast` (a file dropped on the canvas): reduce in one smooth (bilinear, widened) pass,
+        // 2–3× faster than Bicubic's two; the smart object re-renders from its source in Bicubic
+        // once it is transformed.
+        let fast = scale < 1.0 && p.get("fast").and_then(Value::as_bool).unwrap_or(false);
+        px = resize_surface(&px, scale, scale, if fast { Resample::Bilinear } else { Resample::Bicubic });
     }
     let px = translate_surface(&px, dx as i32, dy as i32);
     // A linked place is always a smart object.
     let smart = linked.is_some() || setup.smart;
     Ok(PreparedPlace { name: name.to_string(), bytes, linked, vector, smart, px, scale, at: (dx, dy), size: (w, h) })
+}
+
+/// The pixels of `doc` when it is one visible raster layer in `fmt` that composites as itself
+/// (Normal, fully opaque, no mask, style, clipping or Blend If, inside the canvas): what flattening
+/// it would give, without the composite (a 12 MP photo's took ~0.2 s).
+pub(crate) fn plain_pixels(doc: &photocraft_doc::Document, fmt: photocraft_color::PixelFormat) -> Option<photocraft_raster::Surface> {
+    let [l] = doc.layers.as_slice() else { return None };
+    let LayerContent::Raster(surf) = &l.content else { return None };
+    let plain = l.visible
+        && l.opacity >= 1.0
+        && l.fill_opacity >= 1.0
+        && l.blend == photocraft_color::BlendMode::Normal
+        && !l.clipped
+        && l.mask.is_none()
+        && l.vector_mask.is_none()
+        && !photocraft_compose::effects::has_effects(l)
+        && l.excluded_channels == 0
+        && l.blend_if.is_default()
+        && l.advanced.is_default()
+        && l.video.is_none();
+    let inside = doc.bounds().contains_rect(&surf.content_bounds());
+    let untiled_clear = surf.default_pixel().iter().all(|v| *v == 0.0);
+    (plain && inside && untiled_clear && surf.format() == fmt && doc.mode == fmt.mode && doc.depth == fmt.sample).then(|| surf.clone())
 }
 
 /// Add a prepared place to the active document as one history step (Place Embedded / Linked).

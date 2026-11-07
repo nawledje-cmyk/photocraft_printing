@@ -214,7 +214,8 @@ pub(super) fn flattened_source(src: &Document, fmt: PixelFormat) -> Result<Surfa
     if native(src.mode) || native(fmt.mode) {
         return source_surface_from_buffer(src, &photocraft_compose::flatten(src), fmt);
     }
-    convert_source(src, fmt, |f| composite_in_blocks(src, f))
+    // A single plain layer (a placed photo) is its own composite.
+    convert_source(src, fmt, |f| crate::file_cmds::plain_pixels(src, f).unwrap_or_else(|| composite_in_blocks(src, f)))
 }
 
 /// Pixels per block of [`composite_in_blocks`]: the compositor's own bands are 8 Mpx, which for

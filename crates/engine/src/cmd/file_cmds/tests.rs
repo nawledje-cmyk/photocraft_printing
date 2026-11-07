@@ -1934,3 +1934,31 @@ fn sanitize_keeps_windows_device_names_off_the_disk() {
         assert_eq!(sanitize(name), name);
     }
 }
+
+/// A one-layer file (a photo) is placed from its own pixels, the same as flattening it would give;
+/// anything else (a second layer, lowered opacity) is flattened as before.
+#[test]
+fn a_single_plain_layer_is_its_own_flattened_image() {
+    let mut src = Session::new();
+    src.execute("file.new", serde_json::json!({"width": 70, "height": 40, "background": "white"})).unwrap();
+    src.execute("filter.noise.addNoise", serde_json::json!({"amount": 40})).unwrap();
+    let png = photocraft_io::export(&src.active().unwrap().doc, "p.png", &Default::default()).unwrap().bytes;
+    let doc = photocraft_io::import_with_options("p.png", &png, &Default::default()).unwrap().document;
+    let fmt = photocraft_color::PixelFormat::new(doc.mode, doc.depth, true);
+    let fast = super::plain_pixels(&doc, fmt).expect("a plain photo");
+    let full = super::flattened(&doc, fmt);
+    assert_eq!(fast.read_region(doc.bounds()), full.read_region(doc.bounds()));
+    let mut faded = doc.clone();
+    faded.layers[0].opacity = 0.5;
+    assert!(super::plain_pixels(&faded, fmt).is_none());
+    let mut two = doc.clone();
+    two.layers.push(two.layers[0].clone());
+    assert!(super::plain_pixels(&two, fmt).is_none());
+    // A dropped file is reduced in one smooth pass: same size and place as Bicubic's.
+    let mut s = Session::new();
+    s.execute("file.new", serde_json::json!({"width": 35, "height": 20})).unwrap();
+    let setup = crate::file_cmds::place_setup(&s, &serde_json::json!({})).unwrap();
+    let a = crate::file_cmds::prepare_place(&setup, "p.png", png.clone(), None, &serde_json::json!({"fast": true})).unwrap();
+    let b = crate::file_cmds::prepare_place(&setup, "p.png", png, None, &serde_json::json!({})).unwrap();
+    assert_eq!(a.pixels().content_bounds(), b.pixels().content_bounds());
+}
