@@ -276,6 +276,81 @@ impl GpuCanvas {
         }
     }
 
+    /// Builds Free Transform's GPU warp on a thread, checks it against the CPU warp, and installs
+    /// it as `photocraft_algo`'s warp accelerator when they agree: resize and rotate then render on
+    /// this device, with the CPU as the fallback for anything it declines or fails. Not on a
+    /// software adapter (the CPU is faster there), nor with `PHOTOCRAFT_CPU_WARP` set.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn start_warp(&self) {
+        if std::env::var_os("PHOTOCRAFT_CPU_WARP").is_some() || self.fault().is_some() {
+            return;
+        }
+        if self.rs.adapter.get_info().device_type == eframe::wgpu::DeviceType::Cpu {
+            log::info!("GPU: Free Transform renders on the CPU (software graphics adapter)");
+            return;
+        }
+        let (device, queue, health) = (self.rs.device.clone(), self.rs.queue.clone(), self.health.clone());
+        let spawned = std::thread::Builder::new().name("gpu-warp".into()).spawn(move || {
+            let t0 = std::time::Instant::now();
+            let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let warp = photocraft_gpu::GpuWarp::new(&device, &queue)?;
+                warp.self_check()?;
+                Ok::<_, photocraft_gpu::Unsupported>(warp)
+            }));
+            let warp = match built {
+                Ok(Ok(warp)) => warp,
+                Ok(Err(e)) => {
+                    log::warn!("GPU: Free Transform renders on the CPU: {}", e.0);
+                    return;
+                }
+                Err(_) => {
+                    log::warn!("GPU: Free Transform renders on the CPU: building the GPU warp failed");
+                    return;
+                }
+            };
+            log::info!("GPU: Free Transform renders on the GPU (warp checked against the CPU in {:.1} s)", t0.elapsed().as_secs_f64());
+            let warp = std::sync::Mutex::new(warp);
+            let failures = std::sync::atomic::AtomicU32::new(0);
+            let accel: photocraft_algo::transform::WarpAccelerator = std::sync::Arc::new(move |req: &photocraft_algo::transform::WarpRequest<'_>| {
+                // A lost device, or one that keeps failing: the CPU from then on.
+                if health.fault().is_some() || failures.load(Ordering::Relaxed) >= 3 {
+                    return None;
+                }
+                let t0 = std::time::Instant::now();
+                let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| warp.lock().unwrap_or_else(std::sync::PoisonError::into_inner).run(req)));
+                match ran {
+                    Ok(Ok(out)) => {
+                        if crate::frame_stages::logging() {
+                            log::info!(
+                                "GPU: warped {}×{} → {}×{} in {:.0} ms",
+                                req.src_rect.width(),
+                                req.src_rect.height(),
+                                req.dst.width(),
+                                req.dst.height(),
+                                t0.elapsed().as_secs_f64() * 1000.0
+                            );
+                        }
+                        Some(out)
+                    }
+                    Ok(Err(e)) => {
+                        failures.fetch_add(1, Ordering::Relaxed);
+                        log::warn!("GPU: a warp ran on the CPU instead: {}", e.0);
+                        None
+                    }
+                    Err(_) => {
+                        failures.fetch_add(1, Ordering::Relaxed);
+                        log::warn!("GPU: a warp panicked on the GPU; it ran on the CPU instead");
+                        None
+                    }
+                }
+            });
+            photocraft_algo::transform::set_warp_accelerator(Some(accel));
+        });
+        if let Err(e) = spawned {
+            log::warn!("GPU: Free Transform renders on the CPU: no thread to build the GPU warp on ({e})");
+        }
+    }
+
     /// Whether the wgpu layer compositor is built and installed.
     #[cfg(test)]
     pub(crate) fn has_compositor(&self) -> bool {

@@ -47,6 +47,8 @@ pub mod health;
 pub mod plan;
 mod prefix;
 pub mod timing;
+#[cfg(not(target_arch = "wasm32"))]
+mod warp;
 
 use std::collections::HashMap;
 use std::num::NonZeroU64;
@@ -59,6 +61,8 @@ use photocraft_geom::{Rect, TILE_SIZE, TileCoord};
 use photocraft_raster::{Surface, Tile};
 
 pub use camera_raw::{CAMERA_RAW_SHADER, CameraRawDevelop};
+#[cfg(not(target_arch = "wasm32"))]
+pub use warp::{GpuWarp, WARP_REDUCE_SHADER, WARP_SHADER};
 pub use health::{DeviceHealth, Fault};
 pub use plan::{Kernel, Plan, Role, Unsupported, plan};
 pub use timing::{GpuTimer, GpuTiming};

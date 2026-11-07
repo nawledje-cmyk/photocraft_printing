@@ -400,3 +400,36 @@ fn bicubic_interior_fast_path_matches_the_reference_sampler() {
     }
     assert!(checked >= 3, "interior pixels checked: {checked}");
 }
+
+/// An accelerator is offered affine bilinear and bicubic warps of RGBA8 surfaces, with what it
+/// needs to sample them as the CPU does; what it returns is the result, and declining (or a warp
+/// it isn't offered) leaves the CPU path.
+#[test]
+fn the_warp_accelerator_is_offered_affine_rgba8_warps_only() {
+    let mut src = Surface::new(PixelFormat::RGBA8);
+    src.fill_rect(Rect::new(10, 20, 50, 40), &[1.0, 0.0, 0.0, 1.0]);
+    let r = src.content_bounds();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    let accel: WarpAccelerator = std::sync::Arc::new(move |req: &WarpRequest<'_>| {
+        log.lock().unwrap().push((req.src.len(), req.dst, req.scale, req.edge, req.bicubic));
+        Some(vec![255; req.dst.width() as usize * req.dst.height() as usize * 4])
+    });
+    let half = Homography([0.5, 0.0, 5.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0]);
+    let out = warp_surface_with_accelerator(&src, r, &half, Interp::Bicubic, &accel).expect("offered");
+    let (len, dst, scale, edge, bicubic) = seen.lock().unwrap()[0];
+    assert_eq!(len, 40 * 20 * 4);
+    assert_eq!(dst, warp_output_bounds(r, &half).unwrap());
+    assert!((scale - 0.5).abs() < 1e-9 && bicubic);
+    assert_eq!(edge, [0.0, 0.0, 20.0, 10.0], "the reduced source: 5..25 × 10..20");
+    assert_eq!(out.content_bounds(), dst);
+    // Not offered: projective, nearest, or another format.
+    let projective = Homography([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.001, 0.0, 1.0]);
+    assert!(warp_surface_with_accelerator(&src, r, &projective, Interp::Bicubic, &accel).is_none());
+    assert!(warp_surface_with_accelerator(&src, r, &half, Interp::Nearest, &accel).is_none());
+    let gray = Surface::new(PixelFormat::GRAY8);
+    assert!(warp_surface_with_accelerator(&gray, Rect::new(0, 0, 4, 4), &half, Interp::Bicubic, &accel).is_none());
+    // Declining: nothing.
+    let no: WarpAccelerator = std::sync::Arc::new(|_: &WarpRequest<'_>| None);
+    assert!(warp_surface_with_accelerator(&src, r, &half, Interp::Bilinear, &no).is_none());
+}

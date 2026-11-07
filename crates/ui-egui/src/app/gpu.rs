@@ -56,6 +56,11 @@ impl PhotocraftApp {
     pub fn prewarm_gpu_compositor(&self) {
         if let Some(gpu) = &self.gpu {
             gpu.prewarm_compositor();
+            // Preferences › Performance › Rendering Mode: CPU keeps every pixel on the CPU.
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.session.prefs().performance.effective_rendering_mode() != photocraft_engine::prefs::RenderingMode::Cpu {
+                gpu.start_warp();
+            }
         }
     }
 

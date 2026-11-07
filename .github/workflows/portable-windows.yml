@@ -62,6 +62,16 @@ jobs:
           WGPU_BACKEND: dx12
           PHOTOCRAFT_TEST_FALLBACK_ADAPTER: "1"
 
+      # Free Transform's GPU warp builds under DX12 and agrees with the CPU (the app checks the same
+      # at start and falls back to the CPU otherwise): informational.
+      - name: GPU warp matches the CPU on DX12 (informational)
+        continue-on-error: true
+        run: cargo test --locked -p photocraft-gpu --test it warp -- --test-threads=1
+        shell: bash
+        env:
+          WGPU_BACKEND: dx12
+          PHOTOCRAFT_TEST_FALLBACK_ADAPTER: "1"
+
       # Microsoft's DXC shader compiler, shipped beside the .exe: the app uses it instead of FXC,
       # which took ~20 s to build the compositor's shaders at every start on a dual-core laptop.
       # A failed download leaves FXC (the build still publishes).

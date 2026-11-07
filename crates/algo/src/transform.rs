@@ -302,6 +302,109 @@ fn corner_bounds(corners: &[(f64, f64); 4]) -> Option<Rect> {
     Some(Rect::new(bx0, by0, bx1, by1))
 }
 
+/// One warp handed to an accelerator ([`set_warp_accelerator`], the GPU): an affine map of a
+/// straight-alpha RGBA8 source, sampled as [`warp_surface`] samples it.
+pub struct WarpRequest<'a> {
+    /// The source pixels over `src_rect`, row by row, 4 bytes each.
+    pub src: &'a [u8],
+    pub src_rect: Rect,
+    /// The destination pixels to produce (RGBA8, straight alpha, row by row).
+    pub dst: Rect,
+    /// Destination pixel `(x, y)` of `dst` (from its corner) samples the source at
+    /// `(inv[0]·x + inv[1]·y + inv[2], inv[3]·x + inv[4]·y + inv[5])`, in pixels from `src_rect`'s
+    /// corner, pixel centres already accounted for (the `u − 0.5` of the CPU sampler).
+    pub inv: [f64; 6],
+    /// Destination pixels per source pixel; below 1 the bicubic kernel widens by `1 / scale`
+    /// (what the CPU's reduction before the warp does).
+    pub scale: f64,
+    pub bicubic: bool,
+    /// A destination pixel's extent in source pixels, per axis (the edge coverage).
+    pub foot: [f64; 2],
+    /// Where the outline is, in reduced source pixels (`scale` of the source, as the CPU reduces
+    /// it first): `[ox, oy, w, h]`, the reduced source's corner less `src_rect`'s scaled one, and
+    /// its size. `[0, 0, width, height]` of `src_rect` when nothing is reduced.
+    pub edge: [f64; 4],
+}
+
+/// Runs a [`WarpRequest`]: `Some` RGBA8 pixels of `dst`, or `None` to warp on the CPU instead.
+pub type WarpAccelerator = std::sync::Arc<dyn Fn(&WarpRequest<'_>) -> Option<Vec<u8>> + Send + Sync>;
+
+static ACCELERATOR: std::sync::RwLock<Option<WarpAccelerator>> = std::sync::RwLock::new(None);
+
+/// Installs (or with `None` removes) the accelerator [`warp_surface`] tries first for affine
+/// bilinear and bicubic warps of RGBA8 surfaces (the app's GPU); anything it declines runs here.
+pub fn set_warp_accelerator(accelerator: Option<WarpAccelerator>) {
+    *ACCELERATOR.write().unwrap_or_else(std::sync::PoisonError::into_inner) = accelerator;
+}
+
+/// [`warp_surface`] on the CPU only, whatever accelerator is installed (its reference).
+pub fn warp_surface_cpu(src: &Surface, src_rect: Rect, h: &Homography, interp: Interp) -> Result<Surface, photocraft_raster::AllocationError> {
+    warp_with(src, src_rect, h, interp, None, &Interrupt::NONE, false)
+}
+
+/// The largest source or result an accelerator is offered, in pixels.
+const ACCELERATED_MAX_PIXELS: u64 = 64 << 20;
+
+/// The warp through the installed accelerator, when it takes this one.
+fn accelerated(src: &Surface, src_rect: Rect, h: &Homography, interp: Interp, clip: Option<Rect>) -> Option<Surface> {
+    let accel = ACCELERATOR.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()?;
+    accelerated_by(&accel, src, src_rect, h, interp, clip)
+}
+
+/// [`warp_surface`] through `accel` only: `None` when it declines (or the warp isn't one it is
+/// offered). For checking an accelerator against [`warp_surface_cpu`].
+pub fn warp_surface_with_accelerator(src: &Surface, src_rect: Rect, h: &Homography, interp: Interp, accel: &WarpAccelerator) -> Option<Surface> {
+    accelerated_by(accel, src, src_rect, h, interp, None)
+}
+
+fn accelerated_by(accel: &WarpAccelerator, src: &Surface, src_rect: Rect, h: &Homography, interp: Interp, clip: Option<Rect>) -> Option<Surface> {
+    use photocraft_color::{ColorMode, SampleType};
+    let fmt = src.format();
+    let rgba8 = fmt.mode == ColorMode::Rgb && fmt.sample == SampleType::U8 && fmt.alpha;
+    let m = h.0;
+    let affine = m[6] == 0.0 && m[7] == 0.0 && m[8] != 0.0 && m.iter().all(|v| v.is_finite());
+    if !rgba8 || !affine || clip.is_some() || !matches!(interp, Interp::Bicubic | Interp::Bilinear) || src_rect.is_empty() {
+        return None;
+    }
+    let inv = h.inverse()?;
+    let dst = warp_output_bounds(src_rect, h)?;
+    let area = |r: Rect| u64::from(r.width()) * u64::from(r.height());
+    if dst.is_empty() || area(dst) > ACCELERATED_MAX_PIXELS || area(src_rect) > ACCELERATED_MAX_PIXELS || warp_output_clipped(src_rect, h) {
+        return None;
+    }
+    let iv = inv.0;
+    let w = iv[8];
+    let (a, b, c, d, e, f) = (iv[0] / w, iv[1] / w, iv[2] / w, iv[3] / w, iv[4] / w, iv[5] / w);
+    // Destination pixel centre (x + 0.5, y + 0.5) from dst's corner; source position less 0.5,
+    // from src_rect's corner.
+    let (ox, oy) = (f64::from(dst.x0) + 0.5, f64::from(dst.y0) + 0.5);
+    let req_inv = [a, b, a * ox + b * oy + c - f64::from(src_rect.x0) - 0.5, d, e, d * ox + e * oy + f - f64::from(src_rect.y0) - 0.5];
+    let (cx, cy) = ((f64::from(src_rect.x0) + f64::from(src_rect.x1)) / 2.0, (f64::from(src_rect.y0) + f64::from(src_rect.y1)) / 2.0);
+    let local = h.local_scale(cx, cy);
+    // As the CPU path: Bicubic reduces first below 99.9 %, by at most 64×; Bilinear never.
+    let scale = if interp == Interp::Bicubic && local < 0.999 && local > 0.0 { local.max(1.0 / 64.0) } else { 1.0 };
+    let extent = |e: f64| if e.is_finite() && e > 1e-12 { e } else { 1.0 };
+    let foot = [extent(a.abs() + b.abs()), extent(d.abs() + e.abs())];
+    let reduced = crate::resample::scaled_rect(src_rect, scale, scale);
+    let edge = [
+        f64::from(src_rect.x0) * scale - f64::from(reduced.x0),
+        f64::from(src_rect.y0) * scale - f64::from(reduced.y0),
+        f64::from(reduced.width()),
+        f64::from(reduced.height()),
+    ];
+    let edge = if scale < 1.0 { edge } else { [0.0, 0.0, f64::from(src_rect.width()), f64::from(src_rect.height())] };
+    let mut px = vec![[0u8; 4]; usize::try_from(area(src_rect)).ok()?];
+    src.read_rgba8_into(src_rect, &mut px);
+    let bytes: &[u8] = px.as_flattened();
+    let out = accel(&WarpRequest { src: bytes, src_rect, dst, inv: req_inv, scale, bicubic: interp == Interp::Bicubic, foot, edge })?;
+    if out.len() != usize::try_from(area(dst)).ok()?.checked_mul(4)? {
+        return None;
+    }
+    let mut s = Surface::from_interleaved(fmt, dst, &out);
+    s.prune();
+    Some(s)
+}
+
 /// A cancelled `ctl` skips the remaining tiles; the caller discards the result.
 fn warp(
     src: &Surface,
@@ -311,6 +414,25 @@ fn warp(
     clip: Option<Rect>,
     ctl: &Interrupt,
 ) -> Result<Surface, photocraft_raster::AllocationError> {
+    warp_with(src, src_rect, h, interp, clip, ctl, true)
+}
+
+/// [`warp`], offered to the accelerator first when `accelerate`.
+fn warp_with(
+    src: &Surface,
+    src_rect: Rect,
+    h: &Homography,
+    interp: Interp,
+    clip: Option<Rect>,
+    ctl: &Interrupt,
+    accelerate: bool,
+) -> Result<Surface, photocraft_raster::AllocationError> {
+    if accelerate
+        && !ctl.cancelled()
+        && let Some(out) = accelerated(src, src_rect, h, interp, clip)
+    {
+        return Ok(out);
+    }
     let mut fmt = src.format();
     let converted;
     let mut src = if fmt.alpha {

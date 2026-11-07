@@ -12,3 +12,4 @@ mod pipeline_errors;
 mod timing;
 mod uniform_limits;
 mod vector_mask;
+mod warp;
