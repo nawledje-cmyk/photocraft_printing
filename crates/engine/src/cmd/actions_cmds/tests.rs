@@ -703,10 +703,12 @@ fn named_selection_preserves_modes_and_duplicate_occurrences() {
         ..Default::default()
     });
     let before = s.active().unwrap().doc.walk().len();
+    // Played, a name the document doesn't have keeps the selected layer and the action goes on
+    // (`a_played_select_of_a_missing_layer_name_keeps_the_selected_layer`).
     let result = s.execute("actions.play", json!({"action":"Missing"})).unwrap();
-    assert_eq!(result["ran"], 0);
-    assert!(result["failed"]["error"].as_str().unwrap().contains("absent"));
-    assert_eq!(s.active().unwrap().doc.walk().len(), before);
+    assert_eq!(result["ran"], 2, "{result}");
+    assert!(result.get("failed").is_none());
+    assert_eq!(s.active().unwrap().doc.walk().len(), before + 1);
 }
 
 #[test]

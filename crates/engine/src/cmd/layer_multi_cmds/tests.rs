@@ -1521,3 +1521,28 @@ fn merging_plain_layers_matches_the_compositor() {
     assert!(worst <= 1.5 / 255.0, "differs by {} levels", worst * 255.0);
     assert!(fast.pixel(100, 100)[3] > 0.5);
 }
+
+/// A played action that selects a layer by a name the document doesn't have keeps the selected
+/// layer and goes on (the user's "stroke" action stopped at `layer.select` of "Layer 1"); called
+/// directly, the same step is still an error.
+#[test]
+fn a_played_select_of_a_missing_layer_name_keeps_the_selected_layer() {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 40, "height": 30})).unwrap();
+    s.execute("layer.new.layer", json!({"name": "Photo"})).unwrap();
+    let id = s.active().unwrap().active_layer.unwrap();
+    assert!(s.execute("layer.select", json!({"name": "Layer 1"})).is_err());
+    let steps = vec![("layer.select".to_string(), json!({"name": "Layer 1"})), ("layer.setProps".to_string(), json!({"name": "Stroked"}))];
+    s.actions.list.push(crate::actions_cmds::Action::new("stroke", steps));
+    let v = s.execute("actions.play", json!({"action": "stroke"})).unwrap();
+    assert!(v.get("failed").is_none(), "{v}");
+    assert_eq!(v["ran"], 2);
+    let st = s.active().unwrap();
+    assert_eq!(st.active_layer, Some(id));
+    assert_eq!(st.doc.layer(id).unwrap().name, "Stroked");
+    // A name the document has is still selected.
+    s.execute("layer.new.layer", json!({"name": "Top"})).unwrap();
+    s.actions.list.push(crate::actions_cmds::Action::new("pick", vec![("layer.select".to_string(), json!({"name": "Stroked"}))]));
+    s.execute("actions.play", json!({"action": "pick"})).unwrap();
+    assert_eq!(s.active().unwrap().active_layer, Some(id));
+}

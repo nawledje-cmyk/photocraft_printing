@@ -222,6 +222,18 @@ fn range_order(layers: &[Layer], include_collapsed: bool, out: &mut Vec<LayerId>
 
 /// `layer.select`: `{"layer": id, "mode": "replace|toggle|range|add|remove"}`.
 pub fn select(s: &mut Session, p: &Value) -> Result<Value> {
+    // A played action's "select layer `Layer 1`" step, on a document with no layer of that name:
+    // the action goes on with the layer selected now instead of stopping (an action recorded
+    // after clicking a layer then works on any document's selected layer).
+    if s.actions.playing > 0
+        && let Some(name) = p.get("name").and_then(Value::as_str)
+        && p.get("layer").is_none()
+        && let Some(st) = s.active()
+        && st.active_layer.is_some()
+        && !st.doc.walk().into_iter().any(|(_, _, l)| l.name == name)
+    {
+        return Ok(json!({"selected": selected(s).iter().map(|l| l.0).collect::<Vec<_>>(), "kept": true}));
+    }
     let id = selection_target(s, p)?;
     let mode = p.get("mode").and_then(Value::as_str).unwrap_or("replace");
     let st = s.active().ok_or(EngineError::NoDocument)?;
