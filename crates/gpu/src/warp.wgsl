@@ -36,15 +36,6 @@ fn cubic(x: f32) -> f32 {
     return 0.0;
 }
 
-// Past the source, a reduction reads transparency (as the CPU's reduction does before its warp);
-// otherwise the edge repeats.
-fn texel_or_clear(x: i32, y: i32) -> vec4<f32> {
-    if x < 0 || y < 0 || x >= i32(p.size.x) || y >= i32(p.size.y) {
-        return vec4<f32>(0.0);
-    }
-    return texel(x, y);
-}
-
 fn texel(x: i32, y: i32) -> vec4<f32> {
     let sw = i32(p.size.x);
     let sh = i32(p.size.y);
@@ -76,37 +67,19 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     var acc = vec4<f32>(0.0);
     if p.misc.y > 0.5 {
-        // Bicubic, widened by 1 / scale below 100 %.
-        let s = p.misc.x;
-        let r = 2.0 / s;
-        let x0 = i32(ceil(u - r));
-        let x1 = i32(floor(u + r));
-        let y0 = i32(ceil(v - r));
-        let y1 = i32(floor(v + r));
-        var wsum_x = 0.0;
-        for (var i = x0; i <= x1; i++) {
-            wsum_x += cubic((f32(i) - u) * s);
+        // Bicubic at 1:1 (a reduction is done before this pass): the 4 × 4 taps around the
+        // sample, with the CPU's weights, which sum to 1.
+        let ix = i32(floor(u));
+        let iy = i32(floor(v));
+        let fx = u - floor(u);
+        let fy = v - floor(v);
+        let wx = vec4<f32>(cubic(1.0 + fx), cubic(fx), cubic(1.0 - fx), cubic(2.0 - fx));
+        let wy = vec4<f32>(cubic(1.0 + fy), cubic(fy), cubic(1.0 - fy), cubic(2.0 - fy));
+        for (var j = 0; j < 4; j++) {
+            let yy = iy - 1 + j;
+            let row = texel(ix - 1, yy) * wx.x + texel(ix, yy) * wx.y + texel(ix + 1, yy) * wx.z + texel(ix + 2, yy) * wx.w;
+            acc += row * wy[j];
         }
-        var wsum_y = 0.0;
-        for (var j = y0; j <= y1; j++) {
-            wsum_y += cubic((f32(j) - v) * s);
-        }
-        let norm = 1.0 / max(wsum_x * wsum_y, 1e-6);
-        for (var j = y0; j <= y1; j++) {
-            let wy = cubic((f32(j) - v) * s);
-            if wy == 0.0 {
-                continue;
-            }
-            var row = vec4<f32>(0.0);
-            for (var i = x0; i <= x1; i++) {
-                let wx = cubic((f32(i) - u) * s);
-                if wx != 0.0 {
-                    row += select(texel(i, j), texel_or_clear(i, j), s < 0.999) * wx;
-                }
-            }
-            acc += row * wy;
-        }
-        acc *= norm;
     } else {
         let ix = i32(floor(u));
         let iy = i32(floor(v));

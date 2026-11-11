@@ -31,6 +31,9 @@ pub fn composite_layers(solo: &Document, format: photocraft_color::PixelFormat, 
 /// [`composite_layers`] without cropping to the canvas: pixels of the layers that lie outside it are kept
 /// (merging layers must not lose them, #5067).
 pub fn composite_layers_uncropped(solo: &Document, format: photocraft_color::PixelFormat) -> Surface {
+    if let Some(merged) = plain_stack(solo, format) {
+        return merged;
+    }
     let canvas = solo.bounds();
     // The canvas grown to every visible layer's content and effects, so no layer is clipped by `composite_bounds`.
     let reach = solo
@@ -507,4 +510,42 @@ pub fn merge_down(doc: &Document, lower: &Layer, upper: &Layer) -> Layer {
     merged.label = lower.label;
     merged.link_group = lower.link_group;
     merged
+}
+
+/// `solo`'s visible layers merged tile by tile, when each is a plain pixel layer in `format`
+/// (Normal, fully opaque, no mask, style, clipping or Blend If): Normal "over" of straight-alpha
+/// pixels, which is what the compositor computes for them, without compositing the area in
+/// floats (Merge Layers of two pasted pictures froze the window ~0.12 s on a laptop).
+fn plain_stack(solo: &Document, format: photocraft_color::PixelFormat) -> Option<Surface> {
+    use photocraft_color::{BlendMode, ColorMode, SampleType};
+    if !(format.alpha && format.mode == ColorMode::Rgb && format.sample == SampleType::U8 && solo.mode == ColorMode::Rgb) {
+        return None;
+    }
+    let plain = |l: &&Layer| -> bool {
+        let LayerContent::Raster(surf) = &l.content else { return false };
+        l.opacity >= 1.0
+            && l.fill_opacity >= 1.0
+            && l.blend == BlendMode::Normal
+            && !l.clipped
+            && l.mask.is_none()
+            && l.vector_mask.is_none()
+            && !photocraft_compose::effects::has_effects(l)
+            && l.excluded_channels == 0
+            && l.blend_if.is_default()
+            && l.advanced.is_default()
+            && l.video.is_none()
+            && surf.format() == format
+            && surf.default_pixel().iter().all(|v| *v == 0.0)
+    };
+    let visible: Vec<&Layer> = solo.layers.iter().filter(|l| l.visible).collect();
+    if visible.is_empty() || !visible.iter().all(plain) {
+        return None;
+    }
+    let mut surfaces = visible.iter().filter_map(|l| l.surface());
+    let mut out = surfaces.next()?.clone();
+    for top in surfaces {
+        crate::transform_cmds::composite_over(&mut out, top);
+    }
+    out.prune();
+    Some(out)
 }

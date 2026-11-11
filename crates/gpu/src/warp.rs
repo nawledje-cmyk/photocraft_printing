@@ -41,7 +41,13 @@ pub struct GpuWarp {
     queue: wgpu::Queue,
     warp: (wgpu::ComputePipeline, wgpu::BindGroupLayout),
     reduce: (wgpu::ComputePipeline, wgpu::BindGroupLayout),
+    /// Buffers of earlier warps, kept for the next one (a 34 MB result's three buffers were
+    /// created, and the target cleared, for every warp).
+    pool: std::sync::Mutex<Vec<(wgpu::BufferUsages, wgpu::Buffer)>>,
 }
+
+/// The most bytes of buffers kept between warps.
+const POOL_BYTES: u64 = 384 << 20;
 
 fn pipeline(device: &wgpu::Device, label: &str, source: &str, uniform: u64) -> (wgpu::ComputePipeline, wgpu::BindGroupLayout) {
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(label), source: wgpu::ShaderSource::Wgsl(source.into()) });
@@ -89,7 +95,7 @@ impl GpuWarp {
             return Err(Unsupported(format!("the GPU warp pipelines failed to build: {e}")));
         }
         let (warp, reduce) = built;
-        Ok(Self { device: device.clone(), queue: queue.clone(), warp, reduce })
+        Ok(Self { device: device.clone(), queue: queue.clone(), warp, reduce, pool: Default::default() })
     }
 
     /// Runs `req` and reads the result back (blocking; native only). `Err` when the device can't
@@ -106,6 +112,31 @@ impl GpuWarp {
     #[cfg(not(target_arch = "wasm32"))]
     fn buffer(&self, label: &str, bytes: u64, usage: wgpu::BufferUsages) -> wgpu::Buffer {
         self.device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: bytes, usage, mapped_at_creation: false })
+    }
+
+    /// A buffer of at least `bytes` for `usage`: one kept from an earlier warp, or a new one
+    /// (sized up to a whole 4 MB, so the next warp of about this size reuses it). Every pass
+    /// writes all it later reads, so stale contents don't matter.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn pooled(&self, label: &str, bytes: u64, usage: wgpu::BufferUsages) -> wgpu::Buffer {
+        let mut pool = self.pool.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(i) = pool.iter().position(|(u, b)| *u == usage && b.size() >= bytes && b.size() <= bytes.saturating_mul(2).max(8 << 20)) {
+            return pool.swap_remove(i).1;
+        }
+        drop(pool);
+        const STEP: u64 = 4 << 20;
+        let limit = self.device.limits().max_storage_buffer_binding_size.min(self.device.limits().max_buffer_size);
+        self.buffer(label, bytes.div_ceil(STEP).saturating_mul(STEP).min(limit).max(bytes), usage)
+    }
+
+    /// Keeps `buffers` for later warps, the oldest dropped past [`POOL_BYTES`].
+    #[cfg(not(target_arch = "wasm32"))]
+    fn keep(&self, buffers: Vec<(wgpu::BufferUsages, wgpu::Buffer)>) {
+        let mut pool = self.pool.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        pool.extend(buffers);
+        while pool.iter().map(|(_, b)| b.size()).sum::<u64>() > POOL_BYTES && !pool.is_empty() {
+            pool.remove(0);
+        }
     }
 
     /// Runs `pass` in bands of [`BAND_ROWS`], each with its own uniform (`params(first, rows)`).
@@ -156,7 +187,8 @@ impl GpuWarp {
         }
         let f = |v: f64| v as f32;
         let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
-        let source = self.buffer("pc_warp_src", bytes(sw, sh), storage);
+        let readable = wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ;
+        let source = self.pooled("pc_warp_src", bytes(sw, sh), storage);
         self.queue.write_buffer(&source, 0, req.src);
         let mut last = None;
         // Shrinking (Bicubic): reduce by `k` first, x then y, as the CPU does; then warp from the
@@ -170,8 +202,8 @@ impl GpuWarp {
             }
             // The reduced image's corner, in document pixels.
             let (rx0, ry0) = (f64::from(req.src_rect.x0) * k - req.edge[0], f64::from(req.src_rect.y0) * k - req.edge[1]);
-            let across = self.buffer("pc_warp_reduce_x", bytes(rw, sh), storage);
-            let reduced = self.buffer("pc_warp_reduce_y", bytes(rw, rh), storage);
+            let across = self.pooled("pc_warp_reduce_x", bytes(rw, sh), storage);
+            let reduced = self.pooled("pc_warp_reduce_y", bytes(rw, rh), storage);
             let axis = |input_origin: f64, output_origin: f64, vertical: bool| [f(input_origin), f(output_origin), f(k), if vertical { 1.0 } else { 0.0 }];
             let x_axis = axis(f64::from(req.src_rect.x0), rx0, false);
             let horizontal = |row: u32, rows: u32| bytemuck::bytes_of(&ReduceParams { size: [sw, sh, rw, sh], axis: x_axis, band: [rows, row, 0, 0] }).to_vec();
@@ -182,11 +214,12 @@ impl GpuWarp {
             // u_reduced = k·(u + 0.5 + x0) − 0.5 − rx0, from the reduced image's corner.
             let (cx, cy) = (k * 0.5 - 0.5 + req.edge[0], k * 0.5 - 0.5 + req.edge[1]);
             let inv = [a * k, b * k, c * k + cx, d * k, e * k, g * k + cy];
+            self.keep(vec![(storage, source), (storage, across)]);
             (reduced, rw, rh, inv, [req.foot[0] * k, req.foot[1] * k], [0.0, 0.0, f64::from(rw), f64::from(rh)])
         } else {
             (source, sw, sh, req.inv, req.foot, req.edge)
         };
-        let target = self.buffer("pc_warp_dst", bytes(dw, dh), wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
+        let target = self.pooled("pc_warp_dst", bytes(dw, dh), storage);
         let warp = |row: u32, rows: u32| {
             bytemuck::bytes_of(&Params {
                 inv0: [f(inv[0]), f(inv[1]), f(inv[2]), 0.0],
@@ -199,17 +232,19 @@ impl GpuWarp {
             .to_vec()
         };
         self.dispatch(&Pass { stage: &self.warp, input: &input, output: &target, width: dw, height: dh }, &warp, &mut last)?;
-        let readback = self.buffer("pc_warp_readback", bytes(dw, dh), wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ);
+        let readback = self.pooled("pc_warp_readback", bytes(dw, dh), readable);
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("pc_warp_readback") });
         encoder.copy_buffer_to_buffer(&target, 0, &readback, 0, bytes(dw, dh));
         last = Some(self.queue.submit([encoder.finish()]));
-        readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let wanted = ..bytes(dw, dh);
+        readback.slice(wanted).map_async(wgpu::MapMode::Read, |_| {});
         self.device.poll(wgpu::PollType::Wait { submission_index: last, timeout: Some(std::time::Duration::from_secs(20)) }).map_err(|e| Unsupported(format!("GPU wait failed: {e}")))?;
         let out = {
-            let data = readback.slice(..).get_mapped_range().map_err(|e| Unsupported(format!("GPU readback failed: {e:?}")))?;
+            let data = readback.slice(wanted).get_mapped_range().map_err(|e| Unsupported(format!("GPU readback failed: {e:?}")))?;
             data.to_vec()
         };
         readback.unmap();
+        self.keep(vec![(storage, input), (storage, target), (readable, readback)]);
         Ok(out)
     }
 

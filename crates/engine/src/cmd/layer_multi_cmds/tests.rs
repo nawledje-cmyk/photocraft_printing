@@ -1488,3 +1488,36 @@ fn translate_can_carry_the_selection_in_the_same_step() {
         assert_eq!(state(&s), before, "dx {dx}: and changes nothing");
     }
 }
+
+/// Merge Layers of plain pixel layers takes the tile-wise path: the same pixels (within a level)
+/// as the compositor gives for the same layers, partly transparent ones included.
+#[test]
+fn merging_plain_layers_matches_the_compositor() {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 300, "height": 280, "background": "white"})).unwrap();
+    let mut ids = vec![];
+    for (i, color) in ["#ff0000", "#0000ff", "#00ff00"].iter().enumerate() {
+        s.execute("layer.new.layer", json!({})).unwrap();
+        s.execute("select.rect", json!({"x": 20 + i * 60, "y": 30 + i * 40, "width": 150, "height": 120})).unwrap();
+        s.execute("select.modify.feather", json!({"radius": 6})).unwrap();
+        s.execute("edit.fill", json!({"color": color, "opacity": 70})).unwrap();
+        s.execute("select.deselect", json!({})).unwrap();
+        ids.push(s.active().unwrap().active_layer.unwrap());
+    }
+    let doc = s.active().unwrap().doc.clone();
+    let fmt = photocraft_color::PixelFormat::new(doc.mode, doc.depth, true);
+    let mut solo = (*doc).clone();
+    solo.layers = ids.iter().map(|id| doc.layer(*id).unwrap().clone()).collect();
+    let fast = crate::pixels::composite_layers_uncropped(&solo, fmt);
+    // The compositor's answer: one layer made not plain (99.999 % opacity changes nothing visible).
+    let mut slow_doc = solo.clone();
+    slow_doc.layers[0].blend_if = Default::default();
+    slow_doc.layers[0].name = "x".into();
+    slow_doc.layers[0].fill_opacity = 0.999_999;
+    let slow = crate::pixels::composite_layers_uncropped(&slow_doc, fmt);
+    let b = fast.content_bounds().union(&slow.content_bounds());
+    let (a, c) = (fast.read_region(b), slow.read_region(b));
+    let worst = a.iter().zip(&c).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+    assert!(worst <= 1.5 / 255.0, "differs by {} levels", worst * 255.0);
+    assert!(fast.pixel(100, 100)[3] > 0.5);
+}
