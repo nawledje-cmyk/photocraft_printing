@@ -6,6 +6,7 @@ import android.content.ActivityNotFoundException;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Intent;
+import android.content.res.Configuration;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
@@ -72,6 +73,11 @@ public class MainActivity extends Activity {
         }
         String crash = ErrorLog.takeLastCrash();
         if (crash != null) showError("PhotoCraft closed unexpectedly last time", crash);
+        else if (ErrorLog.lastRunEndedUnexpectedly() != null) {
+            // No Java crash recorded: the WebView itself (often the phone's graphics driver) stopped it.
+            showError("PhotoCraft closed unexpectedly last time",
+                    "Last steps before it closed:\n" + ErrorLog.lastRunEndedUnexpectedly());
+        }
     }
 
     private void start(Bundle savedInstanceState) {
@@ -195,9 +201,10 @@ public class MainActivity extends Activity {
             }
         });
 
+        // Always a fresh start: restoring a WebView saved before the page had loaded left it blank,
+        // and the editor's documents aren't in the saved state anyway.
         ErrorLog.write("loading " + START_URL);
-        if (savedInstanceState != null) webView.restoreState(savedInstanceState);
-        else webView.loadUrl(START_URL);
+        webView.loadUrl(START_URL);
     }
 
     private void showError(String title, String details) {
@@ -231,9 +238,22 @@ public class MainActivity extends Activity {
     }
 
     @Override
-    protected void onSaveInstanceState(Bundle outState) {
-        super.onSaveInstanceState(outState);
-        if (webView != null) webView.saveState(outState);
+    protected void onStart() {
+        super.onStart();
+        ErrorLog.markRunning(true);
+    }
+
+    @Override
+    protected void onStop() {
+        // In the background Android may close the app at any time; that isn't a crash.
+        ErrorLog.markRunning(false);
+        super.onStop();
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        ErrorLog.write("screen changed: " + newConfig.screenWidthDp + "x" + newConfig.screenHeightDp + " dp");
     }
 
     @Override
@@ -262,6 +282,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        ErrorLog.write("activity closing" + (isChangingConfigurations() ? " (to restart for a configuration change)" : ""));
         if (webView != null) {
             webView.destroy();
             webView = null;

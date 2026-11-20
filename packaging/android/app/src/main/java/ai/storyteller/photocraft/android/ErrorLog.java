@@ -38,6 +38,8 @@ final class ErrorLog {
     private static Context app;
     private static File file;
     private static File lastCrash;
+    private static File running;
+    private static String unexpectedEnd;
 
     private ErrorLog() { }
 
@@ -46,6 +48,13 @@ final class ErrorLog {
         file = new File(app.getFilesDir(), NAME);
         lastCrash = new File(app.getFilesDir(), "last-crash.txt");
         // Keep the log small: start over once it is large.
+        running = new File(app.getFilesDir(), "running");
+        // The marker is there while the app is on screen; still there now means the last run
+        // ended without closing, e.g. the WebView's graphics stopped the whole app.
+        if (running.exists()) {
+            unexpectedEnd = tail(12);
+            running.delete();
+        }
         if (file.length() > MAX_BYTES) file.delete();
 
         final Thread.UncaughtExceptionHandler previous = Thread.getDefaultUncaughtExceptionHandler();
@@ -53,6 +62,7 @@ final class ErrorLog {
             try {
                 String trace = stackTrace(error);
                 write("CRASH on thread " + thread.getName() + "\n" + trace);
+                if (running != null) running.delete();
                 try (FileOutputStream out = new FileOutputStream(lastCrash)) {
                     out.write((stamp() + "\n" + trace).getBytes(StandardCharsets.UTF_8));
                 }
@@ -82,6 +92,33 @@ final class ErrorLog {
 
     static void write(String message, Throwable error) {
         write(message + "\n" + stackTrace(error));
+    }
+
+    /** The last lines of the log when the last run ended while on screen, else null. */
+    static synchronized String lastRunEndedUnexpectedly() {
+        return unexpectedEnd;
+    }
+
+    static synchronized void markRunning(boolean on) {
+        if (running == null) return;
+        try {
+            if (on) {
+                if (!running.exists() && !running.createNewFile()) Log.w(TAG, "no run marker");
+            } else {
+                running.delete();
+            }
+        } catch (IOException e) {
+            Log.w(TAG, "run marker", e);
+        }
+    }
+
+    private static String tail(int lines) {
+        try {
+            java.util.List<String> all = Files.readAllLines(file.toPath(), StandardCharsets.UTF_8);
+            return String.join("\n", all.subList(Math.max(0, all.size() - lines), all.size()));
+        } catch (Exception e) {
+            return "(no log)";
+        }
     }
 
     /** The crash from the last run, once; null when the last run didn't crash. */
