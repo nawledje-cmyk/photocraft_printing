@@ -1,0 +1,8 @@
+# Filled in by package.sh
+/app/src/main/assets/www/
+/app/src/main/res/mipmap-*/
+# Gradle
+/.gradle/
+/build/
+/app/build/
+/local.properties

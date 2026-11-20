@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The editor's own dark grey shows while it loads, with no title bar. -->
+    <style name="Theme.PhotoCraft" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/background_dark</item>
+        <item name="android:statusBarColor">#262626</item>
+        <item name="android:navigationBarColor">#262626</item>
+    </style>
+</resources>
