@@ -4,6 +4,7 @@
     <!-- The app runs entirely from files inside the APK; it needs no network or storage permission. -->
 
     <application
+        android:name=".PhotoCraftApp"
         android:allowBackup="true"
         android:hardwareAccelerated="true"
         android:icon="@mipmap/ic_launcher"

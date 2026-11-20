@@ -18,9 +18,11 @@ import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
+import android.webkit.ConsoleMessage;
 import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
@@ -50,22 +52,46 @@ public class MainActivity extends Activity {
     private static final String START_URL = "https://" + HOST + "/assets/www/index.html";
     private static final int PICK_FILES = 1;
 
+    private static final int MAX_CONSOLE_LINES = 200;
+
     private WebView webView;
     private ValueCallback<Uri[]> pendingChooser;
+    private int consoleLines;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        goFullScreen();
+        ErrorLog.write("activity starting");
+        try {
+            start(savedInstanceState);
+        } catch (Throwable e) {
+            // Show what went wrong instead of closing: the log has the details.
+            ErrorLog.write("startup failed", e);
+            showError("PhotoCraft couldn't start", e.toString());
+            return;
+        }
+        String crash = ErrorLog.takeLastCrash();
+        if (crash != null) showError("PhotoCraft closed unexpectedly last time", crash);
+    }
+
+    private void start(Bundle savedInstanceState) {
 
         final WebViewAssetLoader loader = new WebViewAssetLoader.Builder()
                 .setDomain(HOST)
                 .addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(this))
                 .build();
 
+        ErrorLog.write("creating WebView");
         webView = new WebView(this);
         webView.setBackgroundColor(Color.rgb(0x26, 0x26, 0x26));
         setContentView(webView);
+        try {
+            goFullScreen();
+        } catch (Throwable e) {
+            ErrorLog.write("full screen failed (continuing)", e);
+        }
+        android.content.pm.PackageInfo wv = WebView.getCurrentWebViewPackage();
+        ErrorLog.write("WebView " + (wv != null ? wv.packageName + " " + wv.versionName : "unknown"));
 
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
@@ -79,7 +105,6 @@ public class MainActivity extends Activity {
         s.setDisplayZoomControls(false);
         s.setTextZoom(100);
         s.setSupportMultipleWindows(false);
-        s.setOffscreenPreRaster(true);
 
         webView.addJavascriptInterface(new Bridge(), "PhotoCraftAndroid");
 
@@ -110,7 +135,24 @@ public class MainActivity extends Activity {
             }
 
             @Override
+            public void onPageFinished(WebView view, String url) {
+                ErrorLog.write("page loaded: " + url);
+            }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                ErrorLog.write("load error " + error.getErrorCode() + " " + error.getDescription() + ": " + request.getUrl());
+            }
+
+            @Override
+            public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse response) {
+                ErrorLog.write("HTTP " + response.getStatusCode() + ": " + request.getUrl());
+            }
+
+            @Override
             public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                ErrorLog.write("editor page stopped (" + (detail.didCrash() ? "crashed" : "killed for memory")
+                        + ", priority " + detail.rendererPriorityAtExit() + ")");
                 // The editor's page was stopped, usually for memory. Start it again rather than close.
                 Toast.makeText(MainActivity.this,
                         "PhotoCraft ran out of memory and restarted. Unsaved work was lost.",
@@ -121,6 +163,19 @@ public class MainActivity extends Activity {
         });
 
         webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onConsoleMessage(ConsoleMessage m) {
+                // The editor's own errors and warnings (and the first lines of anything else).
+                boolean important = m.messageLevel() == ConsoleMessage.MessageLevel.ERROR
+                        || m.messageLevel() == ConsoleMessage.MessageLevel.WARNING;
+                if (consoleLines < MAX_CONSOLE_LINES && (important || consoleLines < 40)) {
+                    consoleLines++;
+                    ErrorLog.write("console " + m.messageLevel() + ": " + m.message()
+                            + " (" + m.sourceId() + ":" + m.lineNumber() + ")");
+                }
+                return true;
+            }
+
             @Override
             public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
                 if (pendingChooser != null) pendingChooser.onReceiveValue(null);
@@ -140,8 +195,17 @@ public class MainActivity extends Activity {
             }
         });
 
+        ErrorLog.write("loading " + START_URL);
         if (savedInstanceState != null) webView.restoreState(savedInstanceState);
         else webView.loadUrl(START_URL);
+    }
+
+    private void showError(String title, String details) {
+        new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setMessage(details + "\n\nThe full log is in Downloads/PhotoCraft/" + ErrorLog.NAME + ".")
+                .setPositiveButton("OK", null)
+                .show();
     }
 
     @Override
@@ -175,7 +239,13 @@ public class MainActivity extends Activity {
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if (hasFocus) goFullScreen();
+        if (hasFocus && webView != null) {
+            try {
+                goFullScreen();
+            } catch (Throwable e) {
+                ErrorLog.write("full screen failed", e);
+            }
+        }
     }
 
     @Override
@@ -247,7 +317,7 @@ public class MainActivity extends Activity {
                 open.put(id, new Saving(uri, out, safe));
                 return id;
             } catch (Exception e) {
-                Log.e(TAG, "save " + safe, e);
+                ErrorLog.write("save " + safe + " failed", e);
                 toast("Couldn't save " + safe + ": " + e.getMessage());
                 return -1;
             }

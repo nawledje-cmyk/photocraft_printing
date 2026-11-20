@@ -77,4 +77,40 @@ jobs:
           gh release delete android-latest --yes --cleanup-tag || true
           gh release create android-latest PhotoCraft.apk \
             --target "$SHA" --prerelease --title "PhotoCraft for Android" \
-            --notes "PhotoCraft for Android phones and tablets (Android 10 or newer), with custom action shortcuts. On your phone, download PhotoCraft.apk, open it, and allow installing from your browser when asked. Saved and exported files go to Downloads/PhotoCraft."
+            --notes "PhotoCraft for Android phones and tablets (Android 10 or newer), with custom action shortcuts. On your phone, download PhotoCraft.apk, open it, and allow installing from your browser when asked. Saved and exported files go to Downloads/PhotoCraft, with the app's error log (PhotoCraft-error-log.txt). The emulator-* files are from a test start of this build on an Android emulator."
+
+      # Start the APK on an emulator and keep what happened (logcat, the app's error log, a
+      # screenshot) with the release. Informational: it doesn't hold back the download.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Start on an emulator
+        id: emulator
+        continue-on-error: true
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          ram-size: 4096M
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: packaging/android/emulator-check.sh PhotoCraft.apk emulator-out
+
+      - name: Keep emulator results
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [ -d emulator-out ] || { echo "::warning::no emulator results"; exit 0; }
+          for f in summary.txt logcat.txt error-log.txt screen.png; do
+            [ -s "emulator-out/$f" ] && cp "emulator-out/$f" "emulator-$f"
+          done
+          gh release upload android-latest emulator-* --clobber || true
+          if [ -s emulator-out/summary.txt ]; then
+            sed -e 's/%/%25/g' emulator-out/summary.txt | head -c 30000 | awk 'BEGIN{ORS="%0A"; printf "::notice title=emulator::"} {print}'
+            echo
+          fi
