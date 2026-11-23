@@ -725,7 +725,7 @@ fn warp_with(
                                 for (j, wyj) in wy.iter().enumerate() {
                                     let start = first + j * stride;
                                     let Some(block) = px.get(start..start + 16) else { continue };
-                                    for (tap, wxi) in block.chunks_exact(4).zip(wx) {
+                                    for (tap, wxi) in block.as_chunks::<4>().0.iter().zip(wx) {
                                         let k = wxi * wyj;
                                         a4[0] += f64::from(tap[0]) * k * 1.0;
                                         a4[1] += f64::from(tap[1]) * k * 1.0;

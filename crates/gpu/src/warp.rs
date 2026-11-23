@@ -282,7 +282,7 @@ impl GpuWarp {
             let (dw, dh) = (dst.width() as usize, dst.height() as usize);
             let mut want = vec![[0u8; 4]; dw * dh];
             cpu.read_rgba8_into(dst, &mut want);
-            let got: Vec<[u8; 4]> = gpu.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
+            let got: Vec<[u8; 4]> = gpu.as_chunks::<4>().0.to_vec();
             // Inside the picture (covered by both 2 px around): every channel within `max_tol`.
             // The 1–2 px antialiased outline may differ (the CPU reduces first, then warps).
             let opaque = |v: &[[u8; 4]], x: usize, y: usize| v.get(y * dw + x).is_some_and(|p| p[3] > 0);
