@@ -1,5 +1,5 @@
 //! Word, Excel and PowerPoint files (.docx, .xlsx, .pptx), opened as their printed pages: laid out
-//! as a PDF by `office2pdf` (pure Rust, Apache-2.0), then opened like any PDF ([`crate::pdf_import`]).
+//! as a PDF by `office2pdf` (pure Rust, Apache-2.0), then opened like any PDF (`crate::pdf_import`).
 //! Desktop only.
 
 use crate::IoError;

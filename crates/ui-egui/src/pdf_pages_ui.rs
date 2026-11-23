@@ -22,8 +22,8 @@ const CELL: f32 = 150.0;
 pub(crate) enum Purpose {
     /// Each opens as its own document.
     Open,
-    /// Each is placed on the active document (dropped on its canvas).
-    Place,
+    /// Each is placed on this document (dropped on its canvas).
+    Place(photocraft_doc::DocId),
 }
 
 /// A rendered page on its way back from the loader.
@@ -43,7 +43,7 @@ pub(crate) struct Picker {
     purpose: Purpose,
     /// 0 until a locked file is unlocked.
     pages: usize,
-    /// Waiting for the password ([`photocraft_io::pdf_import::check`] said so).
+    /// Waiting for the password ([`photocraft_io::pdf_pick::check`] said so).
     locked: bool,
     /// The password that opened it ("" for none), and what's typed in the password box.
     password: String,
@@ -88,7 +88,7 @@ pub(crate) struct PdfPages {
 /// Whether `bytes` goes through the window: a PDF with more than one page (its count), or a
 /// password-protected one (0 pages known yet, locked).
 fn needs_window(bytes: &[u8]) -> Option<(usize, bool)> {
-    use photocraft_io::pdf_import::{PdfError, check, is_pdf};
+    use photocraft_io::pdf_pick::{PdfError, check, is_pdf};
     if !is_pdf(bytes) {
         return None;
     }
@@ -212,7 +212,7 @@ fn convert(ctx: &egui::Context, p: &mut Picker) {
 /// The laid-out PDF of an Office file landed: its pages show (one opens at once). False when the
 /// file can't be opened (reported).
 fn converted(app: &mut PhotocraftApp, ctx: &egui::Context, p: &mut Picker, r: Result<Vec<u8>, String>) -> bool {
-    use photocraft_io::pdf_import::check;
+    use photocraft_io::pdf_pick::check;
     let pages = r.and_then(|pdf| {
         let n = check(&pdf, "").map_err(|e| photocraft_io::IoError::from(e).to_string())?;
         p.bytes = Arc::new(pdf);
@@ -242,7 +242,7 @@ fn thumbnails(ctx: &egui::Context, p: &mut Picker) {
     let (tx, rx) = std::sync::mpsc::channel();
     let (worker_bytes, worker_stop, repaint, password) = (p.bytes.clone(), p.stop.clone(), ctx.clone(), p.password.clone());
     let started = spawn("pdf-thumbnails", move || {
-        let _ = photocraft_io::pdf_import::thumbnails(&worker_bytes, &password, THUMB_PX, |i, t| {
+        let _ = photocraft_io::pdf_pick::thumbnails(&worker_bytes, &password, THUMB_PX, |i, t| {
             let image = egui::ColorImage::from_rgba_unmultiplied([t.width as usize, t.height as usize], &t.rgba);
             let sent = tx.send((i, image)).is_ok();
             repaint.request_repaint();
@@ -255,7 +255,7 @@ fn thumbnails(ctx: &egui::Context, p: &mut Picker) {
 /// The typed password: when it opens the file, the pages show (or a single page opens at once);
 /// otherwise the box says so. False when the file can't be opened at all (reported).
 fn unlock(app: &mut PhotocraftApp, ctx: &egui::Context, p: &mut Picker) -> bool {
-    use photocraft_io::pdf_import::{PdfError, check};
+    use photocraft_io::pdf_pick::{PdfError, check};
     match check(&p.bytes, &p.typed) {
         Ok(pages) => {
             p.password = std::mem::take(&mut p.typed);
@@ -296,7 +296,7 @@ fn load(ctx: &egui::Context, p: &mut Picker) {
             if stop.load(Ordering::Relaxed) {
                 return;
             }
-            let r = photocraft_io::pdf_import::import_page(&page_name(&name, i), &bytes, &password, i, &photocraft_raster::Interrupt::NONE)
+            let r = photocraft_io::pdf_pick::import_page(&page_name(&name, i), &bytes, &password, i, &photocraft_raster::Interrupt::NONE)
                 .map(|r| (r.document, r.warnings))
                 .map_err(|e| e.to_string());
             if tx.send((i, r)).is_err() {
@@ -331,13 +331,15 @@ fn arrived(app: &mut PhotocraftApp, name: &str, purpose: Purpose, index: usize, 
                     warnings,
                     bytes: None,
                     slot: None,
+                    order: None,
                     question,
                     policy_applied: false,
+                    smart_object: false,
                 },
             );
         }
-        Purpose::Place => match photocraft_io::export(&doc, "page.png", &Default::default()) {
-            Ok(png) => app.drop_places.push_back(crate::file_open::DropPlace::Bytes(format!("{title}.png"), png.bytes)),
+        Purpose::Place(target) => match photocraft_io::export(&doc, "page.png", &Default::default()) {
+            Ok(png) => app.queue_drop(target, crate::file_open::DropPlace::Bytes(format!("{title}.png"), png.bytes)),
             Err(e) => app.open_failed(&title, &e.to_string()),
         },
     }
@@ -458,7 +460,7 @@ fn window(app: &mut PhotocraftApp, ctx: &egui::Context, p: &mut Picker) -> bool 
             }
             return;
         }
-        let hint = if p.purpose == Purpose::Place {
+        let hint = if matches!(p.purpose, Purpose::Place(_)) {
             "Pick the pages to place. Ctrl-click or Shift-click picks several; double-click places one."
         } else {
             "Pick the pages to open. Ctrl-click or Shift-click picks several; double-click opens one."
@@ -520,7 +522,7 @@ fn window(app: &mut PhotocraftApp, ctx: &egui::Context, p: &mut Picker) -> bool 
                 let n = p.selected.len();
                 let label = match p.purpose {
                     Purpose::Open => crate::i18n::trn(crate::i18n::current(), n as u64, "Open {n} Page", "Open {n} Pages"),
-                    Purpose::Place => crate::i18n::trn(crate::i18n::current(), n as u64, "Place {n} Page", "Place {n} Pages"),
+                    Purpose::Place(_) => crate::i18n::trn(crate::i18n::current(), n as u64, "Place {n} Page", "Place {n} Pages"),
                 };
                 if ui.add_enabled(n > 0, egui::Button::new(label)).clicked() || (n > 0 && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
                     answer = Answer::Load;

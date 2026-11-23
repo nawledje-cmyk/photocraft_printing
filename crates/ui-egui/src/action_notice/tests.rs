@@ -3,7 +3,7 @@ use serde_json::json;
 use super::Kind;
 use crate::PhotocraftApp;
 
-fn app() -> PhotocraftApp {
+fn app() -> Box<PhotocraftApp> {
     PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default())
 }
 
@@ -63,7 +63,7 @@ fn an_action_that_prints_returns_at_once_and_reports_the_print() {
     let mut app = app();
     app.run("file.new", json!({"width": 16, "height": 16})).unwrap();
     app.background_jobs = true;
-    app.session.actions.list.push(photocraft_engine::actions_cmds::Action::new("Print it", vec![("file.printOneCopy".into(), json!({}))]));
+    app.session.actions.list.push(photocraft_engine::actions_cmds::Action::new("Print it", vec![photocraft_engine::actions_cmds::ActionStep::new("file.printOneCopy", json!({}))])).unwrap();
     let v = crate::actions::play(&mut app, &json!({"action": "Print it"})).unwrap();
     assert_eq!(v["ran"], 1, "{v}");
     assert!(app.printing(), "the print runs as a background job");

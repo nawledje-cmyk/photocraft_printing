@@ -34,7 +34,7 @@ fn a_word_document_becomes_its_pages() {
     assert!(super::kind("renamed.bin", &bytes).is_some(), "found by its parts");
     let (pdf, _) = super::to_pdf("letter.docx", &bytes).unwrap();
     assert!(crate::pdf_import::is_pdf(&pdf));
-    assert_eq!(crate::pdf_import::page_count(&pdf).unwrap(), 2);
+    assert_eq!(crate::pdf_pick::page_count(&pdf).unwrap(), 2);
     // Opened (an agent's File › Open): the first page, a Letter page at 300 ppi.
     let r = crate::import_with_options("letter.docx", &bytes, &Default::default()).unwrap();
     assert_eq!((r.document.size.width, r.document.size.height), (2550, 3300));

@@ -28,7 +28,7 @@ fn pdf(w: u32, h: u32, pages: usize) -> Vec<u8> {
     out
 }
 
-fn app() -> PhotocraftApp {
+fn app() -> Box<PhotocraftApp> {
     let services = crate::Services {
         import: Some(Box::new(|name, bytes, opts| photocraft_io::import_with_options(name, bytes, opts).map(|r| (r.document, r.warnings)).map_err(|e| e.to_string()))),
         ..Default::default()
@@ -113,21 +113,22 @@ fn dropped_on_a_canvas_the_picked_pages_are_placed_one_after_another() {
     let mut app = app();
     let ctx = egui::Context::default();
     app.run("file.new", serde_json::json!({"width": 200, "height": 200})).unwrap();
-    app.drop_places.push_back(crate::file_open::DropPlace::Bytes("Flyer.pdf".into(), pdf(100, 50, 2)));
+    let doc = app.session.active().unwrap().doc.id;
+    app.drop_places.push_back((doc, crate::file_open::DropPlace::Bytes("Flyer.pdf".into(), pdf(100, 50, 2))));
     app.place_next_dropped(&ctx);
     assert!(app.drop_places.is_empty());
     frame(&mut app, &ctx);
     let p = app.pdf_pages.picker.as_mut().expect("the page picker shows");
-    assert_eq!(p.purpose, Purpose::Place);
+    assert_eq!(p.purpose, Purpose::Place(doc));
     p.selected = (0..2).collect();
     load(&ctx, p);
     until(&mut app, &ctx, |a| a.pdf_pages.picker.is_none());
     let queued: Vec<String> = app
         .drop_places
         .iter()
-        .map(|d| match d {
+        .map(|(_, d)| match d {
             crate::file_open::DropPlace::Bytes(name, _) => name.clone(),
-            crate::file_open::DropPlace::File(_) => String::new(),
+            _ => String::new(),
         })
         .collect();
     assert_eq!(queued, ["Flyer - Page 1.png", "Flyer - Page 2.png"]);
