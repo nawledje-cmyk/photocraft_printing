@@ -377,13 +377,11 @@ impl Flatten {
     /// Flattens the next band (the whole document if not banded); `Some` with the surface once
     /// the last one is in.
     pub(super) fn advance(&mut self) -> Result<Option<Surface>> {
-        // One plain layer is its own flatten: no composite (a 12 MP photo's took ~0.2 s).
-        if self.out.is_none()
-            && let Some(px) = plain_pixels(&self.doc, self.fmt)
-        {
-            return Ok(Some(px));
-        }
         if !self.banded {
+            // One plain layer is its own flatten: no composite (a 12 MP photo's took ~0.2 s).
+            if let Some(px) = plain_pixels(&self.doc, self.fmt) {
+                return Ok(Some(px));
+            }
             return flattened_checked(&self.doc, self.fmt, self.command).map(Some);
         }
         let (x, y) = self.at;

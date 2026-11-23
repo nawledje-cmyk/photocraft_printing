@@ -4744,7 +4744,7 @@ fn save_and_close_refuses_a_read_only_source() {
 /// anything else (a second layer, lowered opacity) is flattened as before.
 #[test]
 fn a_single_plain_layer_is_its_own_flattened_image() {
-    let mut src = Session::new();
+    let mut src = crate::session();
     src.execute("file.new", serde_json::json!({"width": 70, "height": 40, "background": "white"})).unwrap();
     src.execute("filter.noise.addNoise", serde_json::json!({"amount": 40})).unwrap();
     let png = photocraft_io::export(&src.active().unwrap().doc, "p.png", &Default::default()).unwrap().bytes;

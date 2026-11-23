@@ -125,6 +125,6 @@ fn a_password_protected_pdf_opens_with_its_password() {
         assert_eq!((r.document.size.width, r.document.size.height), (833, 417));
         // Opened without it (File › Open from an agent): a clear error, not a crash.
         let e = crate::import_with_options("locked.pdf", bytes, &Default::default()).err().unwrap().to_string();
-        assert!(e.contains("password"), "{e}");
+        assert!(e.to_ascii_lowercase().contains("password"), "{e}");
     }
 }

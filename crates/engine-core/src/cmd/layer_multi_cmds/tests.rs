@@ -2021,7 +2021,7 @@ fn translate_can_carry_the_selection_in_the_same_step() {
 /// as the compositor gives for the same layers, partly transparent ones included.
 #[test]
 fn merging_plain_layers_matches_the_compositor() {
-    let mut s = Session::new();
+    let mut s = crate::session();
     s.execute("file.new", json!({"width": 300, "height": 280, "background": "white"})).unwrap();
     let mut ids = vec![];
     for (i, color) in ["#ff0000", "#0000ff", "#00ff00"].iter().enumerate() {
@@ -2055,7 +2055,7 @@ fn merging_plain_layers_matches_the_compositor() {
 /// directly, the same step is still an error.
 #[test]
 fn a_played_select_of_a_missing_layer_name_keeps_the_selected_layer() {
-    let mut s = Session::new();
+    let mut s = crate::session();
     s.execute("file.new", json!({"width": 40, "height": 30})).unwrap();
     s.execute("layer.new.layer", json!({"name": "Photo"})).unwrap();
     let id = s.active().unwrap().active_layer.unwrap();

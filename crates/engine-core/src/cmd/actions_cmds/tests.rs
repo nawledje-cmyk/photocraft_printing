@@ -1553,7 +1553,7 @@ fn arrange_that_cannot_move_is_a_noop_in_playback() {
 /// delete that takes the folder's actions and shortcuts with it.
 #[test]
 fn action_folders_nest_rename_move_and_delete() {
-    let mut s = Session::new();
+    let mut s = crate::session();
     s.actions.list.push(Action::new("Sharpen", vec![])).unwrap();
     s.actions.list.push(Action::new("Loose", vec![])).unwrap();
     assert_eq!(s.execute("actions.newFolder", json!({"name": "Retouch"})).unwrap()["folder"], "Retouch");
@@ -1585,7 +1585,7 @@ fn action_folders_nest_rename_move_and_delete() {
 /// Bad folder params are errors, never panics.
 #[test]
 fn action_folder_commands_reject_bad_params() {
-    let mut s = Session::new();
+    let mut s = crate::session();
     s.actions.list.push(Action::new("A", vec![])).unwrap();
     s.execute("actions.newFolder", json!({"name": "One"})).unwrap();
     for (id, p) in [
@@ -1621,7 +1621,7 @@ fn action_folder_commands_reject_bad_params() {
 /// Empty folders are saved with the actions and come back.
 #[test]
 fn action_folders_round_trip_through_actions_json() {
-    let mut s = Session::new();
+    let mut s = crate::session();
     s.actions.list.push(Action::new("A", vec![])).unwrap();
     s.execute("actions.newFolder", json!({"name": "Empty"})).unwrap();
     s.execute("actions.newFolder", json!({"name": "Inner", "parent": "Empty"})).unwrap();
@@ -1636,7 +1636,7 @@ fn action_folders_round_trip_through_actions_json() {
 /// contents and refuses to put one inside itself.
 #[test]
 fn action_add_and_move_folder() {
-    let mut s = Session::new();
+    let mut s = crate::session();
     s.actions.list.push(Action::new("A", vec![ActionStep::new("filter.blur.blur", json!({}))])).unwrap();
     s.execute("actions.newFolder", json!({"name": "One"})).unwrap();
     s.execute("actions.newFolder", json!({"name": "Two"})).unwrap();
@@ -1659,7 +1659,7 @@ fn action_add_and_move_folder() {
 /// another one, carrying subfolders along.
 #[test]
 fn folders_reorder_before_a_sibling() {
-    let mut s = Session::new();
+    let mut s = crate::session();
     for n in ["A", "B", "C"] {
         s.execute("actions.newFolder", json!({"name": n})).unwrap();
     }

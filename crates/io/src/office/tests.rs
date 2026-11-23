@@ -35,13 +35,19 @@ fn a_word_document_becomes_its_pages() {
     let (pdf, _) = super::to_pdf("letter.docx", &bytes).unwrap();
     assert!(crate::pdf_import::is_pdf(&pdf));
     assert_eq!(crate::pdf_pick::page_count(&pdf).unwrap(), 2);
-    // Opened (an agent's File › Open): the first page, a Letter page at 300 ppi.
+    // Opened (an agent's File › Open): its pages side by side, Letter pages at 300 ppi.
     let r = crate::import_with_options("letter.docx", &bytes, &Default::default()).unwrap();
-    assert_eq!((r.document.size.width, r.document.size.height), (2550, 3300));
-    // Something is printed on it (the text), not a blank page.
-    let s = r.document.layers[0].surface().unwrap();
-    let dark = (300..1500).step_by(3).flat_map(|x| (300..420).step_by(3).map(move |y| (x, y))).any(|(x, y)| s.pixel(x, y)[0] < 0.5);
-    assert!(dark, "the first line of text is drawn");
+    assert_eq!(r.document.size.height, 3300);
+    assert!(r.document.size.width >= 2 * 2550, "both pages: {}", r.document.size.width);
+    // Something is printed on them (the text), not blank pages.
+    let dark = r.document.walk().into_iter().filter_map(|(_, _, l)| l.surface()).any(|s| {
+        let b = s.content_bounds();
+        (b.x0..b.x1).step_by(3).flat_map(|x| (b.y0..b.y1).step_by(3).map(move |y| (x, y))).any(|(x, y)| {
+            let p = s.pixel(x, y);
+            p[3] > 0.5 && p[0] < 0.5
+        })
+    });
+    assert!(dark, "the text is drawn");
 }
 
 #[test]

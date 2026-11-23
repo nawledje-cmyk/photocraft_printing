@@ -1064,7 +1064,7 @@ fn import_stages(
         }
         // Word, Excel and PowerPoint: laid out as a PDF (office.rs), then opened as one.
         #[cfg(not(target_arch = "wasm32"))]
-        if photocraft_formats::detect(name, bytes).is_none() && office::kind(name, bytes).is_some() {
+        if office::kind(name, bytes).is_some() {
             let (pdf, mut warnings) = office::to_pdf(name, bytes)?;
             let mut r = pdf_import::import(name, &pdf, opts, ctl)?;
             warnings.append(&mut r.warnings);

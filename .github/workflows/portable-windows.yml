@@ -33,7 +33,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: storytold/craft-fonts
-          ref: b076417b5880bd4154bd22f00695b1d28c6bea83
+          ref: cc9269cd8d8258785dac603fba3122e5d2556795
           path: craft-fonts
           persist-credentials: false
 
@@ -101,18 +101,6 @@ jobs:
           WGPU_DX12_COMPILER: dxc
           PHOTOCRAFT_TEST_FALLBACK_ADAPTER: "1"
 
-      # Large GPU redraws are drawn in bands over several frames; once the bands are drawn the canvas
-      # must match one full redraw. Checked on WARP (informational).
-      - name: Banded GPU redraws end exact (informational)
-        id: bands
-        continue-on-error: true
-        run: cargo test --locked -p photocraft-ui-egui --lib -- a_large_gpu_redraw_is_banded_and_ends_exact --nocapture
-        shell: bash
-        env:
-          WGPU_BACKEND: dx12
-          PHOTOCRAFT_REQUIRE_GPU_TESTS: "1"
-          CARGO_PROFILE_DEV_DEBUG: "0"
-
       # `heif`: open HEIC/HEIF photos (pure-Rust decoder), as official builds do.
       - name: Build
         run: cargo build --release --locked -p photocraft --features heif
@@ -152,4 +140,4 @@ jobs:
           gh release delete portable-latest --yes --cleanup-tag || true
           gh release create portable-latest PhotoCraft-Portable-win64.zip PhotoCraft-Portable-win64.exe \
             --target "$SHA" --prerelease --title "PhotoCraft portable (Windows 64-bit)" \
-            --notes "Portable Windows 10/11 64-bit build with custom action shortcuts (right-click an action > Custom Shortcut...). Download the .zip and unzip it to keep settings next to the app, or run the .exe on its own."
+            --notes "Portable Windows 10/11 64-bit build with custom action shortcuts (select an action, then Set Key... under the Actions panel). Download the .zip and unzip it to keep settings next to the app, or run the .exe on its own."

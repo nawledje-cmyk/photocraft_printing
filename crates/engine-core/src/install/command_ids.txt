@@ -1015,3 +1015,9 @@ actions.delete
 actions.toggle
 actions.rename
 actions.setColor
+actions.add
+actions.moveFolder
+actions.newFolder
+actions.renameFolder
+actions.deleteFolder
+actions.moveToFolder
