@@ -1,0 +1,116 @@
+name: Android build
+
+# Builds PhotoCraft for Android (the browser build in a full-screen WebView app, see
+# packaging/android/package.sh) and publishes the APK as the `android-latest` release of this
+# repository, replacing the previous one.
+on:
+  push:
+    branches: [custom-action-shortcuts]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: build (android apk)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        # -eo pipefail: a failed build fails its step even through `| tee`.
+        shell: bash
+    env:
+      # Match release.yml's web job.
+      TRUNK_VERSION: 0.21.14
+      PHOTOCRAFT_ANDROID_BUILD: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: android-web
+          cache-on-failure: true
+
+      - name: Install trunk
+        run: |
+          curl --proto '=https' -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.cargo/bin" trunk
+          trunk --version
+
+      - name: Build web app
+        run: packaging/web/package.sh 2>&1 | tee web-build.log
+
+      # The runner's Android SDK and JDK 17 build the app; the Gradle wrapper fetches Gradle.
+      - name: Build APK
+        run: |
+          export JAVA_HOME="${JAVA_HOME_17_X64:-$JAVA_HOME}"
+          packaging/android/package.sh --skip-web 2>&1 | tee apk-build.log
+
+      # Logs aren't always at hand: put the end of a failed step's log in the run's annotations.
+      - name: Report failure
+        if: failure()
+        run: |
+          for log in web-build.log apk-build.log; do
+            [ -s "$log" ] || continue
+            tail -n 80 "$log" | sed -e 's/%/%25/g' | awk -v f="$log" 'BEGIN{ORS="%0A"; printf "::error title=%s::", f} {print}'
+            echo
+          done
+
+      - name: Publish download
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          apk=$(ls dist/release/PhotoCraft-*.apk)
+          cp "$apk" PhotoCraft.apk
+          gh release delete android-latest --yes --cleanup-tag || true
+          gh release create android-latest PhotoCraft.apk \
+            --target "$SHA" --prerelease --title "PhotoCraft for Android" \
+            --notes "PhotoCraft for Android phones and tablets (Android 10 or newer), with custom action shortcuts. On your phone, download PhotoCraft.apk, open it, and allow installing from your browser when asked. Saved and exported files go to Downloads/PhotoCraft, with the app's error log (PhotoCraft-error-log.txt). The emulator-* files are from a test start of this build on an Android emulator."
+
+      # Start the APK on an emulator and keep what happened (logcat, the app's error log, a
+      # screenshot) with the release. Informational: it doesn't hold back the download.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Start on an emulator
+        id: emulator
+        continue-on-error: true
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          ram-size: 4096M
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: packaging/android/emulator-check.sh PhotoCraft.apk emulator-out
+
+      - name: Keep emulator results
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [ -d emulator-out ] || { echo "::warning::no emulator results"; exit 0; }
+          for f in summary.txt logcat.txt error-log.txt screen.png; do
+            [ -s "emulator-out/$f" ] && cp "emulator-out/$f" "emulator-$f"
+          done
+          gh release upload android-latest emulator-* --clobber || true
+          if [ -s emulator-out/summary.txt ]; then
+            sed -e 's/%/%25/g' emulator-out/summary.txt | head -c 30000 | awk 'BEGIN{ORS="%0A"; printf "::notice title=emulator::"} {print}'
+            echo
+          fi
