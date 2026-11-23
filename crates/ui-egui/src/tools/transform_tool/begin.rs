@@ -126,7 +126,7 @@ pub fn begin(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String>
         });
     // A style is drawn again from the pixels as the box moves them, so they are read without it.
     // Not for the selected part of a layer: its style belongs to that part and the rest together.
-    let styled = lifted.is_none() && photocraft_compose::effects::has_effects(layer);
+    let styled = lifted.is_none() && crate::transform_fx::needs_composite(layer);
     let opacity = layer.opacity * layer.fill_opacity;
     let whole = lifted.is_none();
     let allow = type_allow(matches!(layer.content, LayerContent::Text(_)));

@@ -883,3 +883,16 @@ fn bridge_of_finds_the_row_a_fresh_scan_finds() {
     let unknown = CommandRef::new("photocraft.noSuchCommand");
     assert_eq!(bridge_of(&unknown), None);
 }
+
+/// Set Key… gives an action any key, not only a function key: a letter with modifiers plays it,
+/// and the command that had the key by default no longer runs from it.
+#[test]
+fn an_action_plays_from_any_key_set_for_it() {
+    let mut h = harness();
+    add_action(&mut h, "letter", &[("layer.new.layer", json!({"name": "from the key"}))]);
+    crate::actions::assign_shortcut(h.state_mut(), "letter", "Cmd+Alt+K").unwrap();
+    h.run_steps(2);
+    press(&mut h, "Cmd+Alt+K");
+    assert_eq!(active_name(&h), "from the key");
+    assert!(matches!(&take_log(&h.ctx)[..], [(id, Outcome::Ran)] if id == "actions.play:letter"));
+}

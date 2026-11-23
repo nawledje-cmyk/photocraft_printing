@@ -336,6 +336,8 @@ struct ShellRunner<'a> {
     detail: Option<Value>,
     /// The wait after the step that returned [`StepOutcome::Wait`].
     wait: Option<Duration>,
+    /// Each step's command and time, for the log when the action is slow.
+    timings: Vec<(String, f64)>,
 }
 
 impl ShellRunner<'_> {
@@ -446,14 +448,19 @@ impl ActionRunner for ShellRunner<'_> {
         }
         let app = &mut *self.app;
         let target = app.session.active().map(|d| d.doc.id);
+        let step_at = crate::gpu_canvas::now_ms();
+        // The last step of an outermost play has no next step to meet a document locked by a
+        // background save.
+        let last = (0..action.steps.len()).rev().find(|s| !action.disabled.contains(s)) == Some(i) && app.session.recording.playing <= 1;
         let result = match id {
             "actions.play" => play_owned(app, &p, None, &[], budget),
             "actions.conditional" => conditional(app, &p, budget),
             _ if actions_cmds::saves_smart_contents(&app.session, id) => app.session.execute(actions_cmds::SAVE_CONTENTS, json!({})).map_err(|e| e.to_string()),
             _ if actions_cmds::shell_save_command(id) => {
                 // Write synchronously, so the next step doesn't meet a document locked by a
-                // background save.
-                let background = std::mem::replace(&mut app.background_jobs, false);
+                // background save; the last step saves in the background as File › Save As does.
+                let keep = app.background_jobs && last;
+                let background = std::mem::replace(&mut app.background_jobs, keep);
                 let r = app.replay_save(id, &p);
                 app.background_jobs = background;
                 r
@@ -464,8 +471,11 @@ impl ActionRunner for ShellRunner<'_> {
             }
             // An explicit vector paste needs the original OS source, not just an old pixel copy.
             "edit.paste" if p.get("as").is_some() => app.run(id, p.clone()),
+            // On a worker, like File › Print: it prints a snapshot, so later steps can run at once.
+            "file.print" | "file.printOneCopy" => crate::jobs_ui::run(app, id, p.clone()),
             _ => app.session.execute(id, p.clone()).map_err(|e| e.to_string()),
         };
+        self.timings.push((id.to_string(), crate::gpu_canvas::now_ms() - step_at));
         // A called action that paused for a dialog continues here after it once confirmed.
         self.after_call(action, i, id, result, target)
     }
@@ -552,9 +562,11 @@ fn play_steps(
     if !ended {
         // The runner borrows the app for the whole play, so the player reads its own copy of the playable list.
         let list = app.session.actions.playable().clone();
-        let mut runner = ShellRunner { app: &mut *app, interactive, resolved: None, ending: None, detail: None, wait: None };
+        let mut runner = ShellRunner { app: &mut *app, interactive, resolved: None, ending: None, detail: None, wait: None, timings: Vec::new() };
+        let played_at = crate::gpu_canvas::now_ms();
         let report: PlaybackReport = ActionPlayer::play(&list, index, from, &mut runner, budget);
-        let ShellRunner { ending, detail, wait, .. } = runner;
+        let ShellRunner { ending, detail, wait, timings, .. } = runner;
+        log_slow_playback(&action.name, crate::gpu_canvas::now_ms() - played_at, &timings);
         ran = ran.saturating_add(report.ran);
         if let Some(f) = report.failed {
             failed = Some(failure(f.step, &f.command, &f.message, detail));
@@ -605,6 +617,15 @@ fn play_steps(
     })
 }
 
+/// An action that took long enough to be felt: the log names its steps and their times.
+fn log_slow_playback(name: &str, total_ms: f64, timings: &[(String, f64)]) {
+    if total_ms < 50.0 || !crate::frame_stages::logging() {
+        return;
+    }
+    let steps: Vec<String> = timings.iter().map(|(id, ms)| format!("{id} {ms:.1} ms")).collect();
+    log::info!("action \"{name}\" played in {total_ms:.1} ms: {}", steps.join(", "));
+}
+
 /// Runs view command `id` (a view row of `shortcut_dispatch::RUNTIME_COMMANDS`: Zoom In, Fit on Screen, 100%, …) for
 /// app code (menus, action steps, automation): asks the active document's canvas for the framework's command, which its
 /// next pass runs as it runs the command's chord, and journals it now, so an action step plays and records in order.
@@ -636,11 +657,16 @@ pub(crate) fn report_play(app: &mut PhotocraftApp, v: &Value) {
             // Step by Step or Pause For between two steps: the last report comes at the end.
             return;
         }
+        crate::action_notice::played(app, v);
         let step = paused.get("step").and_then(Value::as_u64).unwrap_or(0);
         let template = "Step {step} is waiting for its dialog";
         app.ui.status = crate::i18n::fmt(tl!(template), &[("step", &(step + 1).to_string())]);
         app.ui.status_error = false;
         return;
+    }
+    // The pop-up over the canvas, so a shortcut that changes nothing on screen (a print) still shows it ran.
+    if v.get("paused").is_none() {
+        crate::action_notice::played(app, v);
     }
     let Some(failed) = v.get("failed").filter(|f| f.is_object()) else {
         let ran = v.get("ran").and_then(Value::as_u64).unwrap_or(0);

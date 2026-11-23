@@ -300,6 +300,10 @@ pub fn handle(app: &mut PhotocraftApp, ctx: &egui::Context) {
     if crate::screen_picker::busy(app) {
         return;
     }
+    // Set Key… in the Actions panel is listening: the keys are the new shortcut.
+    if crate::actions::key_capture::capturing(app, ctx) {
+        return;
+    }
     crate::shortcut_dispatch::run_fired(app, ctx, &fired);
     // A held tool letter released: a temporary tool gives the previous one back (#2672).
     crate::spring_tools::tick(app, ctx);

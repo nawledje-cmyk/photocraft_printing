@@ -142,6 +142,8 @@ pub struct OpenPreview {
     other_texels: Option<OtherTexels>,
     /// A box over several layers (#6501): their composite, which `textures` holds.
     several: Option<Several>,
+    /// What is under the moving layer, for its blend modes in the styled preview.
+    pub(crate) backdrop: crate::transform_fx::BackdropCell,
 }
 
 impl OpenPreview {
@@ -162,6 +164,7 @@ impl OpenPreview {
             content_aware: None,
             other_texels: None,
             several: None,
+            backdrop: Default::default(),
         }
     }
 }

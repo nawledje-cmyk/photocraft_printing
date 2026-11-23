@@ -150,7 +150,7 @@ fn show_preview(app: &PhotocraftApp, t: &FreeTransform, pv: &OpenPreview, ui: &m
     let display = preview_display(app, ui.ctx());
     let boxed = t.session.phase() == TransformPhase::Box;
     // The layers that get the styled preview stay PhotoCraft's: a visible layer with a style.
-    let source = LayerStyleSource::new(app).filter(|_| boxed && pv.styled.is_some());
+    let source = LayerStyleSource::new(app, Some(ui.ctx())).filter(|_| boxed && pv.styled.is_some());
     let (map, textures) = match t.session.warp() {
         Some(w) => (PreviewMap::mesh(&w.mesh, t.session.rect()), &pv.textures),
         None => {
@@ -192,7 +192,7 @@ pub(crate) fn styled_composite(app: &PhotocraftApp, zoom: f32) -> Option<(egui::
         return None;
     }
     pv.styled.as_ref()?;
-    let source = LayerStyleSource::new(app)?;
+    let source = LayerStyleSource::new(app, None)?;
     let frame = StyledFrame::new(&pv.textures, texture_quad(t, pv), [pv.doc.size.width, pv.doc.size.height], zoom);
     let plan = craft::imaging::ui::transform_preview::StylePlan::new(
         frame.quad,

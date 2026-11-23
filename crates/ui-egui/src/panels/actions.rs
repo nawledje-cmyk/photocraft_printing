@@ -22,6 +22,7 @@ use host::PhotoActions;
 pub(crate) mod dialogs;
 mod files;
 mod host;
+pub(crate) mod key_capture;
 pub(crate) mod library;
 pub(crate) mod menu;
 pub(crate) mod menu_item;
@@ -40,6 +41,8 @@ pub(crate) use runner::{
 mod drag_drop_tests;
 #[cfg(test)]
 mod files_tests;
+#[cfg(test)]
+mod key_capture_tests;
 #[cfg(test)]
 mod library_tests;
 #[cfg(test)]
@@ -67,6 +70,8 @@ pub struct ActionsUi {
     pub panel: ActionsPanelState,
     /// The action whose in-place rename the next pass opens (the panel menu's Rename), taken once.
     rename: Option<usize>,
+    /// Set Key… while it listens for the new shortcut.
+    key_capture: Option<key_capture::KeyCapture>,
 }
 
 /// The saved form of [`ActionsUi`], with the keys earlier saved states wrote.
@@ -307,6 +312,7 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     }
     let out = widget.show(ui);
     apply_actions_events(app, out.events);
+    key_capture::row(app, ui);
 }
 
 /// Runs the events of the panel, its footer, its row menus and its panel menu, in order. An error

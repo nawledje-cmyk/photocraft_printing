@@ -10,8 +10,11 @@
 //! the style is laid over the resampled texels by the CPU compositor's `composite_with_effects`
 //! (the code that draws the layer once the transform is applied).
 //!
-//! The composite is drawn over transparency with Normal blending, like the mesh it replaces: a
-//! layer's or an effect's blend mode shows against the layers under it only after the commit.
+//! A layer's blend mode (Multiply, Screen…) and its effects' blend modes need what is under the
+//! layer: the document under the box (the preview's document, without the moving pixels) is
+//! composited once in the background into a [`Backdrop`], and the composite is worked out against
+//! it, so the modes show live. The result keeps the layer's own coverage, so the canvas still shows
+//! at full resolution around it. Until the backdrop lands the composite is made over transparency.
 
 use craft::imaging::ui::transform_preview::{StylePlan, StyledContent, StyledSource};
 use craft::ui::canvas::PixelRect;
@@ -23,7 +26,149 @@ use photocraft_doc::{Document, Effect, Layer, LayerContent, LayerId};
 use photocraft_geom::Rect;
 use photocraft_raster::Surface;
 
+use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::PhotocraftApp;
+
+/// Most pixels a [`Backdrop`] holds: a larger document is composited at a reduced scale.
+const BACKDROP_PIXELS: f64 = 4.0e6;
+
+/// Whether a blend mode needs what is under the layer.
+fn blends(mode: BlendMode) -> bool {
+    !matches!(mode, BlendMode::Normal | BlendMode::PassThrough)
+}
+
+/// Whether the box composites `layer` (its style, or its blend mode against what is under it)
+/// rather than drawing its bare pixels over the canvas.
+pub fn needs_composite(layer: &Layer) -> bool {
+    effects::has_effects(layer) || blends(layer.blend)
+}
+
+/// Whether the composite needs what is under the layer: its blend mode isn't Normal, or a style
+/// blends with what is under it (a Multiply drop shadow, Bevel & Emboss…).
+pub fn needs_backdrop(layer: &Layer) -> bool {
+    let effect_blends = |e: &Effect| match e {
+        Effect::DropShadow(s) | Effect::InnerShadow(s) => blends(s.common.blend),
+        Effect::OuterGlow(g) | Effect::InnerGlow(g) => blends(g.common.blend),
+        Effect::Stroke(s) => blends(s.common.blend),
+        Effect::ColorOverlay { common, .. } | Effect::GradientOverlay { common, .. } | Effect::PatternOverlay { common, .. } => blends(common.blend),
+        Effect::Satin(s) => blends(s.common.blend),
+        Effect::BevelEmboss(_) => true,
+    };
+    blends(layer.blend) || (effects::has_effects(layer) && layer.effects.items.iter().any(|e| e.enabled() && effect_blends(e)))
+}
+
+/// What is under the moving layer: the preview's document composited once, at up to
+/// [`BACKDROP_PIXELS`], straight alpha.
+pub struct Backdrop {
+    /// Backdrop pixels per document pixel, at most 1.
+    scale: f64,
+    width: usize,
+    height: usize,
+    px: Vec<[f32; 4]>,
+}
+
+impl Backdrop {
+    /// Composite `doc` band by band, each band averaged down to the backdrop's scale as it comes.
+    pub fn build(doc: &Document) -> Option<Self> {
+        let (w, h) = (f64::from(doc.size.width), f64::from(doc.size.height));
+        if w < 1.0 || h < 1.0 {
+            return None;
+        }
+        let scale = (BACKDROP_PIXELS / (w * h)).sqrt().min(1.0);
+        let (width, height) = (((w * scale).ceil() as usize).max(1), ((h * scale).ceil() as usize).max(1));
+        let mut sum = vec![[0.0f32; 5]; width.checked_mul(height)?];
+        let _ = photocraft_compose::render_bands(doc, doc.bounds(), 64, |band: Buffer| -> Result<(), ()> {
+            let bw = (band.rect.width() as usize).max(1);
+            for (i, p) in band.px.iter().enumerate() {
+                let (x, y) = ((band.rect.x0 as usize) + i % bw, (band.rect.y0 as usize) + i / bw);
+                let (bx, by) = (((x as f64 * scale) as usize).min(width - 1), ((y as f64 * scale) as usize).min(height - 1));
+                if let Some(s) = sum.get_mut(by * width + bx) {
+                    // Averaged premultiplied, so transparent pixels don't darken their neighbours.
+                    s[0] += p[0] * p[3];
+                    s[1] += p[1] * p[3];
+                    s[2] += p[2] * p[3];
+                    s[3] += p[3];
+                    s[4] += 1.0;
+                }
+            }
+            Ok(())
+        });
+        let px = sum
+            .into_iter()
+            .map(|s| {
+                let n = s[4].max(1.0);
+                let a = s[3] / n;
+                if a <= 0.0 { [0.0; 4] } else { [s[0] / n / a, s[1] / n / a, s[2] / n / a, a] }
+            })
+            .collect();
+        Some(Self { scale, width, height, px })
+    }
+
+    /// The backdrop over `rect` of work pixels (document pixels times `scale`).
+    fn region(&self, rect: Rect, scale: f64) -> Buffer {
+        let mut out = Buffer::transparent(rect);
+        let w = (rect.width().max(0) as usize).max(1);
+        let k = self.scale / scale.max(1e-9);
+        for (i, o) in out.px.iter_mut().enumerate() {
+            let (x, y) = (f64::from(rect.x0) + (i % w) as f64 + 0.5, f64::from(rect.y0) + (i / w) as f64 + 0.5);
+            if x < 0.0 || y < 0.0 {
+                continue;
+            }
+            let (bx, by) = ((x * k) as usize, (y * k) as usize);
+            if bx < self.width
+                && by < self.height
+                && let Some(p) = self.px.get(by * self.width + bx)
+            {
+                *o = *p;
+            }
+        }
+        out
+    }
+}
+
+/// A [`Backdrop`] built once in the background for a Free Transform session.
+#[derive(Default)]
+pub struct BackdropCell {
+    started: AtomicBool,
+    built: Arc<OnceLock<Option<Arc<Backdrop>>>>,
+}
+
+impl BackdropCell {
+    /// The backdrop of `doc`, once composited; the first call starts compositing it (`ctx`
+    /// repaints when it lands).
+    pub fn get(&self, doc: &Arc<Document>, ctx: Option<&egui::Context>) -> Option<Arc<Backdrop>> {
+        if let Some(b) = self.built.get() {
+            return b.clone();
+        }
+        if !self.started.swap(true, Ordering::AcqRel) {
+            let (fill, doc, ctx) = (self.built.clone(), doc.clone(), ctx.cloned());
+            let build = move || {
+                let _ = fill.set(Backdrop::build(&doc).map(Arc::new));
+                if let Some(ctx) = ctx {
+                    ctx.request_repaint();
+                }
+            };
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Err(e) = std::thread::Builder::new().name("transform-backdrop".into()).spawn(build) {
+                log::warn!("Free Transform: blend modes show after the commit: no thread for the backdrop ({e})");
+            }
+            #[cfg(target_arch = "wasm32")]
+            build();
+        }
+        self.built.get().cloned().flatten()
+    }
+
+    /// Waits for the backdrop (tests).
+    #[cfg(test)]
+    pub fn wait(&self) {
+        let start = std::time::Instant::now();
+        while self.started.load(Ordering::Acquire) && self.built.get().is_none() && start.elapsed() < std::time::Duration::from_secs(60) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+}
 
 /// Rough cost of compositing one work pixel with `layer`'s style, in nanoseconds: measured per
 /// effect at default settings on an Apple M3 Pro, release build. A Stroke costs the most by far
@@ -68,17 +213,21 @@ pub struct LayerStyleSource<'a> {
     layer: &'a Layer,
     /// Changes whenever the document or the layer's opacity or fill does.
     revision: u64,
+    /// What is under the layer, for its blend modes, once composited.
+    under: Option<Arc<Backdrop>>,
 }
 
 impl<'a> LayerStyleSource<'a> {
     /// The source of the open session's moving layer. `None` for a layer without a style (also
     /// once it is switched off while the box is open) or a hidden one: the bare pixels are drawn
     /// instead.
-    pub fn new(app: &'a PhotocraftApp) -> Option<Self> {
+    pub fn new(app: &'a PhotocraftApp, ctx: Option<&egui::Context>) -> Option<Self> {
         let (t, pv) = (app.ui.transform.as_ref()?, app.transform_preview.as_ref()?);
         let st = app.session.active().filter(|st| st.doc.id == pv.doc.id)?;
-        let layer = st.doc.layer(LayerId(t.layer)).filter(|l| l.visible && effects::has_effects(l))?;
-        Some(Self { doc: &st.doc, layer, revision: revision_of(st.revision, layer) })
+        let layer = st.doc.layer(LayerId(t.layer)).filter(|l| l.visible && needs_composite(l))?;
+        let under = if needs_backdrop(layer) { pv.backdrop.get(&pv.doc, ctx) } else { None };
+        let revision = revision_of(st.revision, layer) ^ u64::from(under.is_some()) ^ ((layer.blend as u64) << 32);
+        Some(Self { doc: &st.doc, layer, revision, under })
     }
 }
 
@@ -105,7 +254,8 @@ impl StyledSource for LayerStyleSource<'_> {
 
     fn compose(&self, plan: &StylePlan, content: &StyledContent) -> Option<ColorImage> {
         let work = work_layer(self.layer, plan.scale);
-        compose(self.doc, &work, plan, content).map(|buf| image(&buf))
+        let under = self.under.as_deref().map(|backdrop| Under { backdrop, blend: self.layer.blend });
+        compose(self.doc, &work, plan, content, under).map(|buf| image(&buf))
     }
 }
 
@@ -114,10 +264,20 @@ fn rect(r: PixelRect) -> Rect {
     Rect::new(r.x0, r.y0, r.x1, r.y1)
 }
 
-/// Composite the resampled `content` with `work`'s style over `plan.shown`, on transparency.
-/// `work` is [`work_layer`] at `plan.scale`; `doc` gives the global light and the patterns. `None`
-/// when `content` does not fill its rectangle.
-fn compose(doc: &Document, work: &Layer, plan: &StylePlan, content: &StyledContent) -> Option<Buffer> {
+/// What a composite is worked out against: the backdrop, and the moving layer's own blend mode
+/// ([`work_layer`] blends Normally).
+#[derive(Clone, Copy)]
+struct Under<'a> {
+    backdrop: &'a Backdrop,
+    blend: BlendMode,
+}
+
+/// Composite the resampled `content` with `work`'s style over `plan.shown`, on transparency, or
+/// against `under` when given: then each pixel keeps the layer's coverage and takes the colour that,
+/// laid Normally over what is under it, gives the blended result. `work` is [`work_layer`] at
+/// `plan.scale`; `doc` gives the global light and the patterns. `None` when `content` does not fill
+/// its rectangle.
+fn compose(doc: &Document, work: &Layer, plan: &StylePlan, content: &StyledContent, under: Option<Under<'_>>) -> Option<Buffer> {
     let content_rect = rect(content.rect);
     if content.texels.len() != content_rect.width() as usize * content_rect.height() as usize {
         return None;
@@ -135,8 +295,28 @@ fn compose(doc: &Document, work: &Layer, plan: &StylePlan, content: &StyledConte
     bands(&mut out.px, width * BAND_ROWS, |i, px| {
         let y0 = shown.y0.saturating_add((i * BAND_ROWS) as i32);
         let band = Rect::new(shown.x0, y0, shown.x1, y0.saturating_add((px.len() / width.max(1)) as i32));
+        let part = crop(&content, band);
         let mut over = Buffer::transparent(band);
-        effects::composite_with_effects(work, &crop(&content, band), &mut over, &maps, bounds, &doc.patterns);
+        effects::composite_with_effects(work, &part, &mut over, &maps, bounds, &doc.patterns);
+        if let Some(u) = under {
+            let base = u.backdrop.region(band, plan.scale);
+            // The layer's result over what is under it: blended as a whole for its own mode, or its
+            // style laid straight onto it, so the style's own modes apply.
+            let full: Vec<[f32; 4]> = if blends(u.blend) {
+                base.px.iter().zip(&over.px).map(|(d, o)| photocraft_color::blend::composite(u.blend, *d, *o, 1.0)).collect()
+            } else {
+                let mut on = base.clone();
+                effects::composite_with_effects(work, &part, &mut on, &maps, bounds, &doc.patterns);
+                on.px.clone()
+            };
+            for ((o, d), c) in over.px.iter_mut().zip(&base.px).zip(full) {
+                let a = o[3];
+                if a > 1e-4 {
+                    let k = 1.0 - a;
+                    *o = [((c[0] - k * d[0]) / a).clamp(0.0, 1.0), ((c[1] - k * d[1]) / a).clamp(0.0, 1.0), ((c[2] - k * d[2]) / a).clamp(0.0, 1.0), a];
+                }
+            }
+        }
         // Copied, not moved out, so `over` hands its band back to the scratch pool on drop.
         for (o, p) in px.iter_mut().zip(over.px.iter().copied()) {
             *o = p;
@@ -281,7 +461,7 @@ mod tests {
     fn composite(layer: &Layer, w: usize, h: usize, quad: [Point; 4], zoom: f32) -> (ColorImage, StylePlan) {
         let texels = ColorImage::new([w, h], vec![BLUE; w * h]);
         let doc = doc();
-        let source = LayerStyleSource { doc: &doc, layer, revision: 0 };
+        let source = LayerStyleSource { doc: &doc, layer, revision: 0, under: None };
         let (plan, content) = planned(&source, &texels, quad, zoom);
         (source.compose(&plan, &content).expect("composited"), plan)
     }
@@ -303,6 +483,35 @@ mod tests {
     const RED: [u8; 3] = [255, 0, 0];
     const GREEN: [u8; 3] = [0, 255, 0];
     const FILL: [u8; 3] = [0, 0, 255];
+
+    /// A Multiply layer previews multiplied with what is under the box, not drawn over it as if it
+    /// were Normal; around it the composite stays clear, so the canvas shows there.
+    #[test]
+    fn a_multiply_layer_is_composited_against_what_is_under_it() {
+        let mut under = doc();
+        let mut grey = Layer::raster("grey", PixelFormat::RGBA8);
+        if let Some(s) = grey.surface_mut() {
+            s.fill_rect(Rect::new(0, 0, 200, 200), &[0.5, 0.5, 0.5, 1.0]);
+        }
+        under.layers.push(grey);
+        let backdrop = Arc::new(Backdrop::build(&under).expect("composited"));
+        let mut l = Layer::raster("multiply", PixelFormat::RGBA8);
+        l.blend = BlendMode::Multiply;
+        assert!(needs_composite(&l) && needs_backdrop(&l));
+        assert!(!needs_composite(&Layer::raster("normal", PixelFormat::RGBA8)), "a Normal layer draws its bare pixels");
+        let quad = rect_quad([60.0, 80.0, 100.0, 100.0]);
+        let texels = ColorImage::new([40, 20], vec![BLUE; 40 * 20]);
+        let doc = doc();
+        let flat = LayerStyleSource { doc: &doc, layer: &l, revision: 0, under: None };
+        let (plan, content) = planned(&flat, &texels, quad, 1.0);
+        let plain = flat.compose(&plan, &content).expect("composited");
+        assert!(is(at(&plain, &plan, 80.0, 90.0), FILL), "without the backdrop, plain blue");
+        let source = LayerStyleSource { under: Some(backdrop), ..flat };
+        let out = source.compose(&plan, &content).expect("composited");
+        let p = at(&out, &plan, 80.0, 90.0);
+        assert!(p.a() == 255 && p.r() < 8 && p.g() < 8 && p.b().abs_diff(128) < 10, "blue × grey is dark blue: {p:?}");
+        assert_eq!(at(&out, &plan, 50.0, 50.0).a(), 0, "outside the layer the canvas shows");
+    }
 
     #[test]
     fn a_stroke_keeps_its_width_when_the_box_is_enlarged() {
@@ -337,7 +546,7 @@ mod tests {
         let quad = [Point::new(40.0, 20.0), Point::new(150.0, 40.0), Point::new(130.0, 180.0), Point::new(20.0, 150.0)];
         let texels = ColorImage::new([30, 40], (0..1200).map(|i| if i % 7 == 0 { Color32::TRANSPARENT } else { BLUE }).collect());
         let doc = doc();
-        let source = LayerStyleSource { doc: &doc, layer: &l, revision: 0 };
+        let source = LayerStyleSource { doc: &doc, layer: &l, revision: 0, under: None };
         let (plan, content) = planned(&source, &texels, quad, 1.0);
         assert!(plan.shown.height() as usize > 2 * BAND_ROWS, "{:?}", plan.shown);
         let banded = source.compose(&plan, &content).expect("composited");
